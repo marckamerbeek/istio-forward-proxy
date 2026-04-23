@@ -1,0 +1,86 @@
+{{- if .Values.networkPolicies.egressFromProxy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "forward-proxy.fullname" . }}-egress
+  labels:
+    {{- include "forward-proxy.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "forward-proxy.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    {{- if .Values.networkPolicies.egressFromProxy.allowDNS }}
+    # DNS naar kube-dns / coredns
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+    # Kubernetes API server (voor ServiceEntry watch)
+    - to:
+        - ipBlock:
+            # cluster-admin moet dit evt. aanpassen voor eigen API CIDR
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+    # Upstream proxy chain
+    - to:
+        {{- range .Values.networkPolicies.egressFromProxy.upstreamCIDRs }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+        {{- if not .Values.networkPolicies.egressFromProxy.upstreamCIDRs }}
+        # Geen CIDR restrictie — cluster-admin moet dit aanpassen voor productie
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        {{- end }}
+      ports:
+        {{- range .Values.networkPolicies.egressFromProxy.upstreamPorts }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+{{- end }}
+---
+{{- if .Values.networkPolicies.ingressToProxy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "forward-proxy.fullname" . }}-ingress
+  labels:
+    {{- include "forward-proxy.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "forward-proxy.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- range .Values.networkPolicies.ingressToProxy.allowFromNamespaces }}
+        {{- if eq . "*" }}
+        - namespaceSelector: {}
+        {{- else }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+        {{- end }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ (split ":" .Values.proxy.listenAddr)._1 | int }}
+    # Kubelet probes
+    - ports:
+        - protocol: TCP
+          port: {{ (split ":" .Values.proxy.metricsAddr)._1 | int }}
+{{- end }}

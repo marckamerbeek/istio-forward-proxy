@@ -1,0 +1,69 @@
+{{- $port := (split ":" .Values.proxy.listenAddr)._1 }}
+============================================================
+ istio-forward-proxy succesvol geïnstalleerd
+============================================================
+
+Release:   {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+Chart:     {{ include "forward-proxy.chart" . }}
+
+De proxy is bereikbaar binnen het cluster op:
+
+    http://{{ include "forward-proxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ $port }}
+
+============================================================
+ Voor gebruikers: HTTP_PROXY configureren
+============================================================
+
+Deploy pods in een namespace met istio.io/dataplane-mode=ambient label,
+en zet de HTTP_PROXY env var:
+
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: mijn-app
+      namespace: team-a
+    spec:
+      containers:
+        - name: app
+          image: ...
+          env:
+            - name: HTTP_PROXY
+              value: "http://{{ include "forward-proxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ $port }}"
+            - name: HTTPS_PROXY
+              value: "http://{{ include "forward-proxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ $port }}"
+
+============================================================
+ Registreer externe hosts
+============================================================
+
+Creeer een ServiceEntry (in welke namespace dan ook) om verkeer naar
+een externe host toe te staan:
+
+    apiVersion: networking.istio.io/v1
+    kind: ServiceEntry
+    metadata:
+      name: example-com
+      namespace: team-a
+    spec:
+      hosts:
+        - example.com
+      ports:
+        - number: 443
+          name: https
+          protocol: HTTPS
+        - number: 80
+          name: http
+          protocol: HTTP
+      resolution: DNS
+
+============================================================
+ Verifieer de installatie
+============================================================
+
+    kubectl -n {{ .Release.Namespace }} get pods
+    kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "forward-proxy.name" . }}
+    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "forward-proxy.fullname" . }} 9090:9090
+    curl http://localhost:9090/debug/allowlist
+
+============================================================

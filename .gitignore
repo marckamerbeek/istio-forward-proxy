@@ -1,0 +1,21 @@
+# Build
+bin/
+dist/
+*.test
+*.out
+coverage.out
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Helm
+*.tgz
+
+# Local secrets (NOOIT committen!)
+*.key
+*.crt
+*.pem
+local-values.yaml

@@ -1,0 +1,28 @@
+{{- if and .Values.proxy.mtls.enabled .Values.proxy.mtls.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "forward-proxy.fullname" . }}-client
+  labels:
+    {{- include "forward-proxy.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "forward-proxy.certSecret" . }}
+  duration: {{ .Values.proxy.mtls.certManager.duration }}
+  renewBefore: {{ .Values.proxy.mtls.certManager.renewBefore }}
+  subject:
+    organizations:
+      - "{{ .Release.Namespace }}"
+  commonName: "{{ include "forward-proxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local"
+  dnsNames:
+    {{- toYaml .Values.proxy.mtls.certManager.dnsNames | nindent 4 }}
+  usages:
+    - digital signature
+    - key encipherment
+    - client auth
+  privateKey:
+    algorithm: RSA
+    size: 2048
+    rotationPolicy: Always
+  issuerRef:
+    {{- toYaml .Values.proxy.mtls.certManager.issuerRef | nindent 4 }}
+{{- end }}

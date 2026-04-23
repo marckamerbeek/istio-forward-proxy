@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "forward-proxy.fullname" . }}
+  labels:
+    {{- include "forward-proxy.labels" . | nindent 4 }}
+  annotations:
+    # Egress proxy is intern, geen LoadBalancer
+    networking.istio.io/service-type: ClusterIP
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "forward-proxy.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: proxy
+      port: {{ .Values.service.proxyPort }}
+      targetPort: proxy
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP

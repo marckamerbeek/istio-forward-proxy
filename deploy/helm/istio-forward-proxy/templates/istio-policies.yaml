@@ -1,0 +1,51 @@
+{{- if .Values.istio.peerAuthentication.enabled }}
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: {{ include "forward-proxy.fullname" . }}
+  labels:
+    {{- include "forward-proxy.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "forward-proxy.selectorLabels" . | nindent 6 }}
+  mtls:
+    mode: {{ .Values.istio.peerAuthentication.mtlsMode }}
+{{- end }}
+---
+{{- if .Values.istio.authorizationPolicy.enabled }}
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: {{ include "forward-proxy.fullname" . }}
+  labels:
+    {{- include "forward-proxy.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "forward-proxy.selectorLabels" . | nindent 6 }}
+  action: ALLOW
+  rules:
+    {{- if or .Values.istio.authorizationPolicy.allowedNamespaces .Values.istio.authorizationPolicy.allowedPrincipals }}
+    - from:
+        - source:
+            {{- with .Values.istio.authorizationPolicy.allowedNamespaces }}
+            namespaces:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+            {{- with .Values.istio.authorizationPolicy.allowedPrincipals }}
+            principals:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+      to:
+        - operation:
+            # Alleen de proxy poort accepteren
+            ports:
+              - "{{ (split ":" .Values.proxy.listenAddr)._1 }}"
+    {{- end }}
+    # Healthcheck probes altijd toestaan (kubelet → metrics port)
+    - to:
+        - operation:
+            ports:
+              - "{{ (split ":" .Values.proxy.metricsAddr)._1 }}"
+{{- end }}

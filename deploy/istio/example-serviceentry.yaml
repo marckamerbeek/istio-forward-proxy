@@ -1,0 +1,42 @@
+# Voorbeeld: hoe een team een externe host registreert.
+# Deploy dit in de eigen team namespace om verkeer naar example.com toe
+# te staan via de centrale forward proxy.
+#
+# De forward proxy watcht ServiceEntries cluster-breed en voegt deze host
+# toe aan zijn allowlist. Verkeer naar example.com via HTTP_PROXY wordt
+# dan doorgelaten; andere hosts krijgen een 403.
+---
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: example-com
+  namespace: team-a
+spec:
+  hosts:
+    - example.com
+    - www.example.com
+  ports:
+    - number: 443
+      name: https
+      protocol: HTTPS
+    - number: 80
+      name: http
+      protocol: HTTP
+  resolution: DNS
+  location: MESH_EXTERNAL
+---
+# Wildcard voorbeeld: alle subdomains van een corporate API provider
+apiVersion: networking.istio.io/v1
+kind: ServiceEntry
+metadata:
+  name: corporate-api
+  namespace: team-a
+spec:
+  hosts:
+    - "*.api.corp-provider.com"
+  ports:
+    - number: 443
+      name: https
+      protocol: HTTPS
+  resolution: DNS
+  location: MESH_EXTERNAL

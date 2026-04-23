@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "forward-proxy.fullname" . }}
+  labels:
+    {{- include "forward-proxy.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "forward-proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "forward-proxy.selectorLabels" . | nindent 8 }}
+        {{- if .Values.istio.ambient.enabled }}
+        # Zorgt dat ztunnel deze pod als ambient deelnemer behandelt
+        istio.io/dataplane-mode: ambient
+        {{- end }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Force pod restart als cert Secret wijzigt
+        checksum/cert-secret: {{ include "forward-proxy.certSecret" . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "forward-proxy.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: proxy
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          args:
+            - --listen={{ .Values.proxy.listenAddr }}
+            - --metrics={{ .Values.proxy.metricsAddr }}
+            - --upstream={{ .Values.proxy.upstream.host }}
+            - --cert-dir=/etc/proxy/certs
+            - --log-level={{ .Values.proxy.logLevel }}
+            - --mtls={{ .Values.proxy.mtls.enabled }}
+            - --insecure-skip-verify={{ .Values.proxy.mtls.insecureSkipVerify }}
+            - --dial-timeout={{ .Values.proxy.timeouts.dial }}
+            - --idle-timeout={{ .Values.proxy.timeouts.idle }}
+            - --read-timeout={{ .Values.proxy.timeouts.read }}
+            - --write-timeout={{ .Values.proxy.timeouts.write }}
+          env:
+            {{- if .Values.proxy.upstream.authSecretRef.name }}
+            - name: UPSTREAM_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.proxy.upstream.authSecretRef.name }}
+                  key: {{ .Values.proxy.upstream.authSecretRef.key }}
+            {{- else if .Values.proxy.upstream.authValue }}
+            - name: UPSTREAM_AUTH
+              value: {{ .Values.proxy.upstream.authValue | quote }}
+            {{- end }}
+            {{- range $key, $val := .Values.proxy.extraHeaders }}
+            - name: EXTRA_HEADER_{{ $key | upper | replace "-" "_" }}
+              value: {{ $val | quote }}
+            {{- end }}
+          ports:
+            - name: proxy
+              containerPort: {{ (split ":" .Values.proxy.listenAddr)._1 | int }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ (split ":" .Values.proxy.metricsAddr)._1 | int }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: {{ .Values.probes.readiness.port }}
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: {{ .Values.probes.liveness.port }}
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.proxy.mtls.enabled }}
+            - name: client-certs
+              mountPath: /etc/proxy/certs
+              readOnly: true
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        {{- if .Values.proxy.mtls.enabled }}
+        - name: client-certs
+          secret:
+            secretName: {{ include "forward-proxy.certSecret" . }}
+            defaultMode: 0400
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

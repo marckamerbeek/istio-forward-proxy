@@ -1,0 +1,250 @@
+# ====================================================================
+# istio-forward-proxy Helm values
+# ====================================================================
+
+# --------------------------------------------------------------------
+# Image configuratie
+# --------------------------------------------------------------------
+image:
+  repository: registry.corp.local/platform/istio-forward-proxy
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+# - name: registry-cred
+
+# --------------------------------------------------------------------
+# Namespace en naamgeving
+# --------------------------------------------------------------------
+# De namespace waar de proxy in draait. Deze moet in ambient mesh staan.
+nameOverride: ""
+fullnameOverride: ""
+
+# --------------------------------------------------------------------
+# Replicas en scaling
+# --------------------------------------------------------------------
+replicaCount: 2
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# --------------------------------------------------------------------
+# Proxy configuratie
+# --------------------------------------------------------------------
+proxy:
+  # Listen adres voor inkomende proxy connecties (HTTP + CONNECT)
+  listenAddr: ":3128"
+  # Metrics / health / readyz endpoint
+  metricsAddr: ":9090"
+  # Log level: debug, info, warn, error
+  logLevel: info
+
+  # --- Upstream proxy (jouw webproxy chain) ---
+  upstream:
+    # host:port van de eerste upstream proxy in de chain.
+    # Deze hostname MOET intern resolvable zijn.
+    host: "upstream-proxy.corp.local:8080"
+    # Proxy-Authorization header waarde die naar upstream wordt gestuurd.
+    # Kan via een Secret key verwijzing (voorkeur) of plain value.
+    # Voorbeeld: "Basic dXNlcjpwYXNz"
+    authValue: ""
+    # Alternatief: haal auth uit een bestaand Secret
+    authSecretRef:
+      name: ""  # Secret naam met key 'proxy-auth'
+      key: "proxy-auth"
+
+  # --- mTLS origination ---
+  mtls:
+    enabled: true
+    # Skip TLS verificatie (ALLEEN voor testing, NOOIT productie)
+    insecureSkipVerify: false
+    # cert-manager certificate generator
+    certManager:
+      enabled: true
+      # Issuer voor het client certificaat
+      issuerRef:
+        name: internal-ca
+        kind: ClusterIssuer
+        group: cert-manager.io
+      # DNS names / URIs voor het client cert
+      dnsNames:
+        - "forward-proxy.istio-egress.svc.cluster.local"
+      # Duration en renewal
+      duration: 2160h  # 90 dagen
+      renewBefore: 360h  # 15 dagen voor expiry
+    # Als certManager.enabled=false, referer dan een bestaande Secret
+    # met tls.crt, tls.key, ca.crt
+    existingSecret: ""
+
+  # --- Extra headers die naar upstream worden gestuurd ---
+  extraHeaders:
+    # X-Corp-Id: "platform-egress"
+    # X-Request-By: "istio-forward-proxy"
+
+  # --- Timeouts ---
+  timeouts:
+    dial: 10s
+    idle: 90s
+    read: 60s
+    write: 60s
+
+# --------------------------------------------------------------------
+# Istio ambient integratie
+# --------------------------------------------------------------------
+istio:
+  ambient:
+    # Voegt istio.io/dataplane-mode=ambient label toe aan de pods
+    enabled: true
+
+  # Strikte mTLS: alle inkomende verbindingen moeten via ztunnel + mTLS
+  peerAuthentication:
+    enabled: true
+    mtlsMode: STRICT
+
+  # AuthorizationPolicy: welke namespaces mogen de proxy bereiken
+  authorizationPolicy:
+    enabled: true
+    # List van namespaces die de proxy mogen aanroepen. Leeg = alleen
+    # zelfde namespace.
+    allowedNamespaces:
+      - "*"  # alle namespaces, voor central shared proxy
+    # Alternatief: specifieke ServiceAccount principals
+    allowedPrincipals: []
+    # - "cluster.local/ns/team-a/sa/app-x"
+    # - "cluster.local/ns/team-b/sa/*"
+
+  # Waypoint voor de proxy zelf — NIET gebruikt in dit model omdat de
+  # proxy zelf al de egress functie vervult. Alleen enablen als je L7
+  # authz wilt op binnenkomend verkeer NAAR de proxy.
+  waypoint:
+    enabled: false
+
+# --------------------------------------------------------------------
+# NetworkPolicies
+# --------------------------------------------------------------------
+# Deze bouwen de "alleen egress-gateway mag naar buiten" constraint.
+networkPolicies:
+  # Policy op de proxy namespace zelf: deze pods MOGEN naar upstream
+  # proxy + DNS; ander egress wordt geblokkeerd.
+  egressFromProxy:
+    enabled: true
+    # DNS (kube-dns / coredns)
+    allowDNS: true
+    # CIDR(s) waar de upstream proxy draait. Leeg = geen CIDR restrictie,
+    # alleen poort restrictie.
+    upstreamCIDRs: []
+    # - 10.20.0.0/16
+    upstreamPorts:
+      - 8080
+      - 443
+
+  # Policy op de proxy namespace: welke namespaces MOGEN binnenkomen.
+  ingressToProxy:
+    enabled: true
+    allowFromNamespaces:
+      # Leeg = alle namespaces (houd rekening met AuthorizationPolicy)
+      - "*"
+
+# --------------------------------------------------------------------
+# Service
+# --------------------------------------------------------------------
+service:
+  type: ClusterIP
+  proxyPort: 3128
+  # Metrics is intern en hoeft geen Service, maar we maken een
+  # ServiceMonitor endpoint op de proxy Service zelf.
+
+# --------------------------------------------------------------------
+# Monitoring
+# --------------------------------------------------------------------
+serviceMonitor:
+  enabled: false
+  # Interval voor Prometheus scraping
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  # release: kube-prometheus-stack
+
+# --------------------------------------------------------------------
+# RBAC
+# --------------------------------------------------------------------
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""  # default: chart fullname
+  annotations: {}
+
+# --------------------------------------------------------------------
+# Pod configuratie
+# --------------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+# --------------------------------------------------------------------
+# Scheduling
+# --------------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+# Spread over nodes en zones voor HA
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: istio-forward-proxy
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: istio-forward-proxy
+
+# --------------------------------------------------------------------
+# Health probes
+# --------------------------------------------------------------------
+probes:
+  readiness:
+    path: /readyz
+    port: 9090
+    initialDelaySeconds: 3
+    periodSeconds: 5
+  liveness:
+    path: /healthz
+    port: 9090
+    initialDelaySeconds: 10
+    periodSeconds: 10

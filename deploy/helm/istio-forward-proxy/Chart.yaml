@@ -1,0 +1,21 @@
+apiVersion: v2
+name: istio-forward-proxy
+description: |
+  Forward proxy voor Istio ambient mode die mTLS originate naar een upstream
+  webproxy chain, met behoud van absolute paden in HTTP request-lines.
+  Vervangt Istio's DestinationRule + ServiceEntry TLS origination voor het
+  specifieke geval waarbij de upstream proxy (bijv. Squid) absolute paden
+  verwacht in plaats van relatieve.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - istio
+  - ambient
+  - forward-proxy
+  - egress
+  - tls-origination
+  - squid
+home: https://github.com/example/istio-forward-proxy
+maintainers:
+  - name: platform-team

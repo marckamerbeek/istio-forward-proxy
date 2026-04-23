@@ -1,0 +1,15 @@
+.git
+.github
+.gitignore
+*.md
+!cmd/**/*.md
+deploy/
+scripts/
+docs/
+test/
+.vscode
+.idea
+dist/
+bin/
+*.test
+coverage.out
