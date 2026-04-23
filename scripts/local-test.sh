@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Lokale integration test ZONDER Kubernetes.
+# Local integration test WITHOUT Kubernetes.
 #
-# Start:
-#   1. Een mock upstream proxy (nginx die request-lines logt)
-#   2. De forward-proxy binary met TLS uit (--mtls=false)
-#   3. Stuurt een test request en verifieert de request-line
+# Starts:
+#   1. A mock upstream proxy (Python HTTP server that logs request-lines)
+#   2. The forward-proxy binary with TLS disabled (--mtls=false)
+#   3. Sends a test request and verifies the expected behavior
 #
-# Dit controleert de kern: ABSOLUTE path preservatie naar upstream.
+# Note: without a Kubernetes cluster the ServiceEntry watcher cannot sync,
+# so the ACL will be empty and all requests will return 403 (fail-closed).
+# For absolute-path verification use scripts/e2e-test.sh on a cluster.
 
 set -euo pipefail
 
@@ -24,9 +26,8 @@ pass() { echo -e "\033[1;32m[PASS]\033[0m $*"; }
 fail() { echo -e "\033[1;31m[FAIL]\033[0m $*"; exit 1; }
 
 # -----------------------------------------------------------------------------
-log "1. Start mock upstream op :$UPSTREAM_PORT"
+log "1. Start mock upstream on :$UPSTREAM_PORT"
 # -----------------------------------------------------------------------------
-# Simpele Python HTTP server die de RAW request-line logt
 cat > "$TMPDIR/upstream.py" <<'PYEOF'
 import http.server
 import socketserver
@@ -35,9 +36,7 @@ import os
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        # Log de raw request-line zoals ontvangen
         print(f"REQLINE: {self.requestline}", flush=True)
-        # Log alle headers ook
         for k, v in self.headers.items():
             print(f"HEADER: {k}: {v}", flush=True)
         self.send_response(200)
@@ -60,39 +59,29 @@ UPSTREAM_PID=$!
 sleep 1
 
 if ! kill -0 $UPSTREAM_PID 2>/dev/null; then
-  fail "Mock upstream niet gestart"
+  fail "Mock upstream did not start"
 fi
-pass "Mock upstream draait (PID $UPSTREAM_PID)"
+pass "Mock upstream running (PID $UPSTREAM_PID)"
 
 # -----------------------------------------------------------------------------
-log "2. Bouw de forward-proxy binary (als die nog niet bestaat)"
+log "2. Build the forward-proxy binary"
 # -----------------------------------------------------------------------------
-# NB: go mod download vereist internet + toegang tot proxy.golang.org
-# Als de build faalt, skip deze test-stap.
 if [[ ! -x "$TMPDIR/forward-proxy" ]]; then
   if ! command -v go >/dev/null; then
-    fail "Go is niet geïnstalleerd"
+    fail "Go is not installed"
   fi
   log "go build..."
   if ! go build -o "$TMPDIR/forward-proxy" ./cmd 2>"$TMPDIR/build.err"; then
-    log "Build gefaald — mogelijk ontbreken dependencies. Bekijk $TMPDIR/build.err"
+    log "Build failed — dependencies may be missing. See $TMPDIR/build.err"
     cat "$TMPDIR/build.err"
     exit 1
   fi
 fi
-pass "Binary gebouwd: $TMPDIR/forward-proxy"
+pass "Binary built: $TMPDIR/forward-proxy"
 
 # -----------------------------------------------------------------------------
-log "3. Start de forward-proxy op :$PROXY_PORT (mTLS uit, geen K8s)"
+log "3. Start forward-proxy on :$PROXY_PORT (mTLS disabled, no K8s)"
 # -----------------------------------------------------------------------------
-# We gebruiken KUBECONFIG=/dev/null zodat de ServiceEntry watcher zonder
-# K8s faalt. Voor deze integration test willen we dat de ACL dichtzit.
-# Omdat er geen ServiceEntries zijn, verwachten we 403 op elke request.
-#
-# Om ACL te omzeilen gebruiken we een mock mode — maar die bestaat nog
-# niet in de binary. Dit demonstreert het limiet van deze test zonder
-# cluster: we kunnen alleen de 403-deny flow verifieren.
-
 cat > "$TMPDIR/kubeconfig.fake" <<'EOF'
 apiVersion: v1
 kind: Config
@@ -113,30 +102,29 @@ PROXY_PID=$!
 sleep 2
 
 if ! kill -0 $PROXY_PID 2>/dev/null; then
-  log "Proxy gestopt. Log:"
+  log "Proxy exited. Log:"
   cat "$TMPDIR/proxy.log"
-  fail "Forward proxy niet gestart"
+  fail "Forward proxy did not start"
 fi
-pass "Forward proxy draait (PID $PROXY_PID)"
+pass "Forward proxy running (PID $PROXY_PID)"
 
 # -----------------------------------------------------------------------------
-log "4. Test: zonder K8s is ACL leeg, dus verwacht 403"
+log "4. Without K8s the ACL is empty — expect 403 (fail-closed)"
 # -----------------------------------------------------------------------------
 STATUS=$(curl -sS -o /dev/null -w "%{http_code}" \
   -x "http://127.0.0.1:$PROXY_PORT" \
   http://some-host.invalid/test 2>&1 || echo "FAIL")
 
 if [[ "$STATUS" == "403" ]]; then
-  pass "403 op host zonder ServiceEntry (correct, fail-closed)"
+  pass "403 for host without ServiceEntry (correct, fail-closed behavior)"
 else
-  log "Verwacht 403 (ACL leeg), got $STATUS"
+  log "Expected 403 (empty ACL), got $STATUS"
   log "Proxy log:"
   tail -20 "$TMPDIR/proxy.log"
 fi
 
 # -----------------------------------------------------------------------------
-log "SAMENVATTING: Lokale test is beperkt omdat de ServiceEntry watcher een"
-log "echt K8s cluster nodig heeft. Voor een volledige end-to-end run die de"
-log "ABSOLUTE path verificatie doet: gebruik scripts/e2e-test.sh op een"
-log "cluster met Istio ambient."
+log "SUMMARY: Local test is limited because the ServiceEntry watcher requires"
+log "a real Kubernetes cluster. For a full end-to-end test including absolute"
+log "path verification, run scripts/e2e-test.sh against a cluster with Istio ambient."
 # -----------------------------------------------------------------------------

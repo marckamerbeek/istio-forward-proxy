@@ -13,7 +13,7 @@ spec:
     - Egress
   egress:
     {{- if .Values.networkPolicies.egressFromProxy.allowDNS }}
-    # DNS naar kube-dns / coredns
+    # DNS to kube-dns / coredns
     - to:
         - namespaceSelector:
             matchLabels:
@@ -24,7 +24,7 @@ spec:
         - protocol: TCP
           port: 53
     {{- end }}
-    # Kubernetes API server (voor ServiceEntry watch)
+    # Kubernetes API server (for ServiceEntry watch)
     - to:
         - ipBlock:
             # cluster-admin moet dit evt. aanpassen voor eigen API CIDR
@@ -41,7 +41,7 @@ spec:
             cidr: {{ . }}
         {{- end }}
         {{- if not .Values.networkPolicies.egressFromProxy.upstreamCIDRs }}
-        # Geen CIDR restrictie — cluster-admin moet dit aanpassen voor productie
+        # No CIDR restriction — cluster-admin should restrict this in production
         - ipBlock:
             cidr: 0.0.0.0/0
         {{- end }}
@@ -79,7 +79,7 @@ spec:
       ports:
         - protocol: TCP
           port: {{ (split ":" .Values.proxy.listenAddr)._1 | int }}
-    # Kubelet probes
+    # Kubelet health probes
     - ports:
         - protocol: TCP
           port: {{ (split ":" .Values.proxy.metricsAddr)._1 | int }}

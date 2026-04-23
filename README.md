@@ -1,110 +1,100 @@
 # istio-forward-proxy
 
-Een forward proxy voor **Istio ambient mode** die het gedrag van Istio's TLS
-origination nabootst (ServiceEntry + DestinationRule met `credentialName`),
-maar met één cruciaal verschil: **het behoudt het absolute pad** in HTTP
-request-lines naar de upstream.
+A forward proxy for **Istio ambient mode** that preserves absolute paths in
+HTTP request-lines when forwarding to an upstream proxy chain.
 
-## Waarom bestaat dit?
-
-Envoy (en dus ook de Istio-native TLS origination) herschrijft absolute URLs
-naar relatieve paden bij het forwarden:
+Envoy's TLS origination (via `ServiceEntry` + `DestinationRule`) rewrites
+absolute URLs to relative paths, breaking downstream proxies such as Squid
+that require absolute-form requests:
 
 ```
-Envoy:     GET /politics HTTP/1.1          ← relatief, voor origin servers
-Deze proxy: GET http://edition.cnn.com/politics HTTP/1.1   ← absoluut, voor proxy chains
+Envoy:                GET /politics HTTP/1.1                        ← origin-server form
+istio-forward-proxy:  GET http://edition.cnn.com/politics HTTP/1.1  ← proxy form (RFC 7230 §5.3.2)
 ```
 
-Wanneer je achter Istio een **proxy chain** hebt staan (bijvoorbeeld een
-corporate Squid die `absoluut pad` vereist), werkt Envoy niet. Deze proxy
-wél.
-
-## Architectuur
+## Architecture
 
 ```
 Pod (HTTP_PROXY=forward-proxy:3128)
- │  plain HTTP met absoluut pad
+ │  plain HTTP with absolute path
  ▼
-ztunnel (HBONE mTLS, SPIFFE identiteit bewaard)
+ztunnel (HBONE mTLS, SPIFFE identity preserved)
  ▼
-istio-forward-proxy (deze repo)
+istio-forward-proxy (this repo)
  │  ACL check via ServiceEntry allowlist
- │  Audit log met SPIFFE identiteit
- │  mTLS origination met client certificaat
+ │  Audit log with SPIFFE identity
+ │  mTLS origination with client certificate
  ▼
-upstream webproxy chain
+upstream proxy chain
  ▼
-externe Squid (ontvangt absoluut pad ✅)
+external Squid (receives absolute path ✅)
  ▼
-externe bestemming
+external destination
 ```
 
 ## Features
 
-| Feature | Beschrijving |
+| Feature | Description |
 |---|---|
-| Absolute path forwarding | `GET http://host/path HTTP/1.1` naar upstream |
-| CONNECT tunnel support | Voor HTTPS verkeer met upstream auth |
-| mTLS origination | Client cert via cert-manager, hot-reload bij rotatie |
-| ServiceEntry-gebaseerde ACL | Alleen geregistreerde hosts doorgelaten |
-| SPIFFE audit logging | Pod identiteit per verbinding in de log |
-| Proxy-Authorization injectie | Credentials naar upstream chain |
-| Custom header manipulatie | Via `extraHeaders` in values.yaml |
-| Prometheus metrics | `/metrics` endpoint met counters en gauges |
-| HPA + PDB | Horizontaal schalen met graceful disruption |
-| Istio ambient integratie | `dataplane-mode=ambient` label, PeerAuthentication STRICT |
+| Absolute path forwarding | `GET http://host/path HTTP/1.1` to upstream |
+| CONNECT tunnel support | For HTTPS traffic with upstream auth |
+| mTLS origination | Client cert via cert-manager, hot-reload on rotation |
+| ServiceEntry-based ACL | Only registered hosts are allowed through |
+| SPIFFE audit logging | Pod identity per connection in structured logs |
+| Proxy-Authorization injection | Credentials forwarded to upstream chain |
+| Custom header injection | Via `extraHeaders` in values.yaml |
+| Prometheus metrics | `/metrics` endpoint with counters and gauges |
+| HPA + PDB | Horizontal scaling with graceful disruption |
+| Istio ambient integration | `dataplane-mode=ambient` label, PeerAuthentication STRICT |
 
-## Projectstructuur
+## Project layout
 
 ```
 .
 ├── cmd/                             Entrypoint (main.go)
 ├── internal/
-│   ├── audit/                      JSON audit events
-│   ├── certs/                      mTLS cert loader + fsnotify reload
-│   ├── proxy/                      Core forward proxy + CONNECT handler
-│   └── serviceentry/               Kubernetes informer voor ACL
+│   ├── audit/                       Structured JSON audit events
+│   ├── certs/                       mTLS cert loader + fsnotify hot-reload
+│   ├── proxy/                       Core forward proxy + CONNECT handler
+│   └── serviceentry/                Kubernetes informer for ACL
 ├── deploy/
-│   ├── docker/Dockerfile           Multi-stage distroless build
-│   ├── helm/istio-forward-proxy/   Helm chart
-│   └── istio/                      Namespace + voorbeeld ServiceEntry
+│   ├── docker/Dockerfile            Multi-stage distroless build
+│   ├── helm/istio-forward-proxy/    Helm chart
+│   └── istio/                       Namespace + example ServiceEntry
 ├── scripts/
-│   ├── build.sh                    Docker image bouwen + pushen
-│   ├── install.sh                  Helm install wrapper
-│   ├── e2e-test.sh                 End-to-end cluster tests
-│   ├── verify-absolute-path.sh     Bewijs dat paden absoluut blijven
-│   └── local-test.sh               Lokale smoke test zonder cluster
-├── test/                            Test fixtures
-└── docs/                            Aanvullende documentatie
+│   ├── build.sh                     Build and push Docker image
+│   ├── install.sh                   Helm install wrapper
+│   ├── e2e-test.sh                  End-to-end cluster tests
+│   ├── verify-absolute-path.sh      Proof that paths stay absolute
+│   └── local-test.sh                Local smoke test without a cluster
+└── docs/                            Additional documentation
 ```
 
-## Installatie
+## Installation
 
-### 1. Build de Docker image
+### 1. Build the Docker image
 
 ```bash
-export IMAGE_REPO=registry.corp.local/platform/istio-forward-proxy
+export IMAGE_REPO=your-registry/istio-forward-proxy
 export IMAGE_TAG=0.1.0
 ./scripts/build.sh
 
-# Of met push naar registry:
+# Build and push:
 PUSH=1 ./scripts/build.sh
 ```
 
-### 2. Configureer je `values.yaml`
+### 2. Configure `values.yaml`
 
-De belangrijkste parameters:
+Key parameters:
 
 ```yaml
 image:
-  repository: registry.corp.local/platform/istio-forward-proxy
+  repository: your-registry/istio-forward-proxy
   tag: "0.1.0"
 
 proxy:
   upstream:
-    # Je eerste upstream in de webproxy chain
-    host: "corporate-proxy.intern.corp:8080"
-    # Ofwel direct, ofwel via Secret (voorkeur)
+    host: "corporate-proxy.corp.local:8080"
     authSecretRef:
       name: upstream-proxy-auth
       key: proxy-auth
@@ -120,21 +110,21 @@ proxy:
 networkPolicies:
   egressFromProxy:
     upstreamCIDRs:
-      - 10.20.0.0/16   # Jouw upstream proxy CIDR
+      - 10.20.0.0/16
 
 istio:
   authorizationPolicy:
     allowedNamespaces:
-      - "*"   # Central shared proxy
+      - "*"
 ```
 
-### 3. Installeer
+### 3. Install
 
 ```bash
 ./scripts/install.sh
 ```
 
-Of handmatig:
+Or manually:
 
 ```bash
 kubectl apply -f deploy/istio/00-namespace.yaml
@@ -143,10 +133,9 @@ helm install istio-forward-proxy ./deploy/helm/istio-forward-proxy \
   --values my-values.yaml
 ```
 
-### 4. Registreer externe hosts
+### 4. Register external hosts
 
-Elk team registreert zelf welke externe hosts hun pods mogen bereiken, in
-hun eigen namespace:
+Each team registers which external hosts their pods may reach in their own namespace:
 
 ```yaml
 apiVersion: networking.istio.io/v1
@@ -168,9 +157,7 @@ spec:
   location: MESH_EXTERNAL
 ```
 
-### 5. Pods configureren
-
-Elke pod die de proxy moet gebruiken zet `HTTP_PROXY`:
+### 5. Configure pods
 
 ```yaml
 env:
@@ -182,16 +169,16 @@ env:
     value: ".svc.cluster.local,.cluster.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
 ```
 
-## Testen
+## Testing
 
-### Lokale unit tests (zonder cluster)
+### Unit tests
 
 ```bash
 cd internal/proxy && go test -v
 ```
 
-De meest kritische test is `TestAbsolutePathPreservation` — deze bewijst dat
-de proxy **niet** doet wat Envoy doet.
+`TestAbsolutePathPreservation` is the critical test — it proves the proxy
+preserves the absolute URI that Envoy would rewrite.
 
 ### End-to-end cluster test
 
@@ -199,43 +186,31 @@ de proxy **niet** doet wat Envoy doet.
 ./scripts/e2e-test.sh
 ```
 
-Dit test:
-- Pod kan niet-geregistreerde hosts niet bereiken (403)
-- ServiceEntry registratie maakt host bereikbaar
-- Metrics endpoint levert data
-- Audit log bevat structured events
+Tests: ACL deny for unregistered hosts (403), allow after ServiceEntry
+registration, metrics endpoint, and structured audit events.
 
-### Bewijs van absolute pad (de belangrijkste test)
+### Absolute path verification
 
 ```bash
 ./scripts/verify-absolute-path.sh
 ```
 
-Dit script deployt een mock upstream die raw request-lines logt, stuurt
-verkeer door de proxy, en faalt als er een relatief pad binnenkomt. Dit is
-het definitieve bewijs dat deze proxy zich anders gedraagt dan Envoy.
+Deploys a mock upstream that logs raw request-lines, sends traffic through
+the proxy, and fails if a relative path is received.
 
-## Operationele concerns
+## Operations
 
-### Certificaat rotatie
+See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full operations runbook.
 
-cert-manager roteert het client certificaat periodiek. De proxy detecteert
-dit automatisch via `fsnotify` op de gemount Secret volume en laadt de nieuwe
-TLS config zonder restart.
+### Certificate rotation
 
-### Horizontaal schalen
+cert-manager rotates the client certificate periodically. The proxy detects
+changes via `fsnotify` on the mounted Secret volume and reloads TLS config
+without a restart.
 
-De HPA is standaard aan. Houd rekening met:
+### Metrics
 
-- **CONNECT tunnels hebben lokale state.** Bij scale-down worden open
-  verbindingen verbroken. Applicaties moeten retry-logic hebben.
-- `scaleDown.stabilizationWindowSeconds: 300` geeft een rustige afbouw.
-- `PodDisruptionBudget.minAvailable: 1` voorkomt totale uitval tijdens
-  rolling updates.
-
-### Monitoring
-
-Prometheus metrics zijn beschikbaar op `:9090/metrics`:
+Prometheus metrics on `:9090/metrics`:
 
 | Metric | Type | Labels |
 |---|---|---|
@@ -243,15 +218,6 @@ Prometheus metrics zijn beschikbaar op `:9090/metrics`:
 | `forward_proxy_active_connections` | gauge | — |
 | `forward_proxy_upstream_dial_errors_total` | counter | — |
 | `forward_proxy_bytes_transferred_total` | counter | direction |
-
-Een `ServiceMonitor` is beschikbaar via `values.yaml`:
-
-```yaml
-serviceMonitor:
-  enabled: true
-  labels:
-    release: kube-prometheus-stack
-```
 
 ### Debugging
 
@@ -264,35 +230,24 @@ curl http://localhost:9090/debug/allowlist
 kubectl -n istio-egress logs -f deployment/istio-forward-proxy \
   | jq 'select(.component == "audit")'
 
-# Detailed trace
+# Increase log verbosity
 kubectl -n istio-egress set env deployment/istio-forward-proxy LOG_LEVEL=debug
 ```
 
-## Relatie tot de Istio TLS origination doc
+## Comparison with Istio TLS origination
 
-De officiele Istio task
+The official Istio
 [Egress TLS Origination](https://istio.io/latest/docs/tasks/traffic-management/egress/egress-tls-origination/)
-beschrijft de standaard aanpak met `ServiceEntry` + `DestinationRule` +
-`credentialName`. Deze repo implementeert hetzelfde gedrag met één verschil:
+task uses `ServiceEntry` + `DestinationRule` + `credentialName`. This proxy
+implements the same pattern with one difference:
 
-| Istio + Envoy | Deze proxy |
+| Istio + Envoy | This proxy |
 |---|---|
-| `ServiceEntry` definieert toegestane hosts | ServiceEntry watcher bouwt ACL |
-| `DestinationRule` met `tls.mode: MUTUAL` | mTLS dial naar upstream |
-| `credentialName` verwijst naar Secret met tls.key/crt, ca.crt | Identieke Secret structuur, via cert-manager |
-| Request naar upstream: **relatief pad** | Request naar upstream: **absoluut pad** |
-| ServiceEntry `targetPort: 443` doet port mapping | Go code doet dezelfde mapping |
+| `ServiceEntry` defines allowed hosts | ServiceEntry watcher builds ACL |
+| `DestinationRule` with `tls.mode: MUTUAL` | mTLS dial to upstream |
+| `credentialName` references a Secret | Same Secret structure, via cert-manager |
+| Request to upstream: **relative path** | Request to upstream: **absolute path** |
 
-## Uitbreidingen
+## License
 
-Mogelijke toekomstige features:
-
-- Rate limiting per SPIFFE identiteit
-- Circuit breaker naar upstream
-- OpenTelemetry tracing
-- Multi-upstream met health-based failover
-- WASM plugin voor custom header logic
-
-## Licentie
-
-Apache 2.0
+Apache 2.0 — see [LICENSE](LICENSE).

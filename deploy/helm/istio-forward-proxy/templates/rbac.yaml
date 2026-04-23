@@ -19,7 +19,7 @@ metadata:
   labels:
     {{- include "forward-proxy.labels" . | nindent 4 }}
 rules:
-  # Lezen van ServiceEntries uit alle namespaces voor de ACL allowlist
+  # Read ServiceEntries from all namespaces to build the ACL allowlist
   - apiGroups: ["networking.istio.io"]
     resources: ["serviceentries"]
     verbs: ["get", "list", "watch"]

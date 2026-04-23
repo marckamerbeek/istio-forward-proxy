@@ -1,7 +1,6 @@
-// Package audit logt elke uitgaande verbinding via de forward proxy als
-// gestructureerde JSON regels. De SPIFFE identiteit van de client pod
-// wordt waar mogelijk afgeleid van de mTLS connection state die ztunnel
-// doorzet (HBONE tunnel).
+// Package audit logs each outgoing connection through the forward proxy as
+// structured JSON lines. The SPIFFE identity of the client pod is extracted
+// from the mTLS connection state forwarded by ztunnel (HBONE tunnel).
 package audit
 
 import (
@@ -14,11 +13,11 @@ type Event struct {
 	Timestamp     time.Time `json:"ts"`
 	ClientAddr    string    `json:"client_addr"`
 	SPIFFE        string    `json:"spiffe,omitempty"`
-	Method        string    `json:"method"` // HTTP-FORWARD of CONNECT
+	Method        string    `json:"method"` // HTTP-FORWARD or CONNECT
 	TargetHost    string    `json:"target_host"`
 	TargetPort    uint32    `json:"target_port"`
 	UpstreamProxy string    `json:"upstream_proxy"`
-	Decision      string    `json:"decision"` // allow of deny
+	Decision      string    `json:"decision"` // allow or deny
 	DenyReason    string    `json:"deny_reason,omitempty"`
 	Status        int       `json:"status,omitempty"`
 	BytesIn       int64     `json:"bytes_in,omitempty"`
@@ -34,8 +33,7 @@ func New(log *slog.Logger) *Logger {
 	return &Logger{log: log.With("component", "audit")}
 }
 
-// Log emit een audit event. Gebruik structured attributes zodat log
-// aggregators (Loki, Splunk, Elastic) direct kunnen indexen.
+// Log emits a structured audit event for log aggregators (Loki, Splunk, Elastic).
 func (l *Logger) Log(e Event) {
 	l.log.Info("egress",
 		"ts", e.Timestamp.Format(time.RFC3339Nano),
@@ -54,7 +52,7 @@ func (l *Logger) Log(e Event) {
 	)
 }
 
-// HostPortFromAddr splitst een net.Addr in host en port (best effort).
+// HostPortFromAddr splits a net.Addr into host and port (best effort).
 func HostPortFromAddr(addr net.Addr) (string, string) {
 	host, port, err := net.SplitHostPort(addr.String())
 	if err != nil {

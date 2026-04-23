@@ -1,6 +1,6 @@
 # Architecture Deep Dive
 
-## De flow in detail
+## Request flow
 
 ```
 ┌───────────────────────────────────────────────────────────────────┐
@@ -8,33 +8,33 @@
 │                  HTTP_PROXY=forward-proxy:3128                    │
 │                                                                   │
 │  curl http://example.com/path                                     │
-│  → client library ziet HTTP_PROXY env var                         │
-│  → stuurt: GET http://example.com/path HTTP/1.1  (absolute-form)  │
-│  → naar TCP: forward-proxy.istio-egress.svc:3128                  │
+│  → HTTP client sees HTTP_PROXY env var                            │
+│  → sends: GET http://example.com/path HTTP/1.1  (absolute-form)   │
+│  → to TCP: forward-proxy.istio-egress.svc:3128                    │
 └───────────────────────────────────────────────────────────────────┘
                           │
                           │  Plain TCP (intra-cluster)
                           ▼
 ┌───────────────────────────────────────────────────────────────────┐
-│                  ztunnel op source node                            │
+│                  ztunnel on source node                           │
 │                                                                   │
-│  - onderschept verkeer richting forward-proxy service              │
-│  - wrapped in HBONE: mTLS tunnel over poort 15008                  │
-│  - presenteert SPIFFE identity van pod:                            │
-│    spiffe://cluster.local/ns/team-a/sa/app-x                       │
+│  - intercepts traffic to the forward-proxy service                │
+│  - wraps in HBONE: mTLS tunnel over port 15008                    │
+│  - presents pod SPIFFE identity:                                  │
+│    spiffe://cluster.local/ns/team-a/sa/app-x                      │
 └───────────────────────────────────────────────────────────────────┘
                           │
-                          │  HBONE mTLS (pod identity doorgezet)
+                          │  HBONE mTLS (pod identity preserved)
                           ▼
 ┌───────────────────────────────────────────────────────────────────┐
-│                  ztunnel op destination node                       │
+│                  ztunnel on destination node                      │
 │                                                                   │
-│  - decrypteert HBONE                                               │
-│  - plaatst SPIFFE URI in header X-Forwarded-Client-Cert (optioneel) │
-│  - levert plain TCP aan forward-proxy pod op poort 3128            │
+│  - decrypts HBONE                                                 │
+│  - optionally sets SPIFFE URI in X-Forwarded-Client-Cert header   │
+│  - delivers plain TCP to forward-proxy pod on port 3128           │
 └───────────────────────────────────────────────────────────────────┘
                           │
-                          │  Plain TCP (lokaal op node)
+                          │  Plain TCP (local on node)
                           ▼
 ┌───────────────────────────────────────────────────────────────────┐
 │              istio-forward-proxy pod                              │
@@ -46,128 +46,120 @@
 │                                                                   │
 │  2. ACL check                                                     │
 │     serviceentry.Watcher.AllowHost("example.com", 80)             │
-│     - zoekt in exacte hosts map                                   │
-│     - valt terug op wildcard matches (*.example.com)              │
-│     - return (true, entry) of (false, _)                          │
+│     - exact host map lookup                                       │
+│     - wildcard fallback (*.example.com)                           │
+│     - returns (true, entry) or (false, _)                         │
 │                                                                   │
-│  3. Indien deny: 403 + audit log, einde                           │
+│  3. On deny: 403 + audit log, done                                │
 │                                                                   │
 │  4. Audit event                                                   │
 │     {                                                             │
-│       "ts": "2026-04-22T...",                                     │
-│       "spiffe": "spiffe://.../ns/team-a/sa/app-x",                │
+│       "ts": "...",                                                │
+│       "spiffe": "spiffe://.../ns/team-a/sa/app-x",               │
 │       "method": "HTTP-FORWARD",                                   │
 │       "target_host": "example.com",                               │
 │       "decision": "allow"                                         │
 │     }                                                             │
 │                                                                   │
-│  5. Open mTLS verbinding naar upstream                            │
+│  5. Open mTLS connection to upstream                              │
 │     - tls.Dial("tcp", "corporate-proxy:8080", tlsCfg)             │
-│     - tlsCfg bevat Certificates = client cert uit Secret          │
-│     - tlsCfg.RootCAs = ca.crt uit Secret                          │
-│     - cert-manager roteert automatisch                            │
-│     - fsnotify detecteert file change, reload zonder restart      │
+│     - tlsCfg.Certificates = client cert from Secret              │
+│     - tlsCfg.RootCAs = ca.crt from Secret                        │
+│     - cert-manager rotates automatically                          │
+│     - fsnotify detects file change, reloads without restart       │
 │                                                                   │
-│  6. Schrijf request-line MET ABSOLUUT PAD                         │
-│     → conn.Write("GET http://example.com/path HTTP/1.1\r\n")      │
-│     → headers:                                                     │
-│        Host: example.com                                           │
-│        Proxy-Authorization: Basic <base64>                         │
-│        [custom headers uit values.yaml]                           │
+│  6. Write request-line WITH ABSOLUTE PATH                         │
+│     → conn.Write("GET http://example.com/path HTTP/1.1\r\n")     │
+│     → headers:                                                    │
+│        Host: example.com                                          │
+│        Proxy-Authorization: Basic <base64>                        │
+│        [custom headers from values.yaml]                          │
 │        [end-to-end client headers, filtered]                      │
 │                                                                   │
-│  7. Lees upstream response, kopieer naar client                   │
+│  7. Read upstream response, copy to client                        │
 └───────────────────────────────────────────────────────────────────┘
                           │
                           │  mTLS (client cert auth)
                           ▼
 ┌───────────────────────────────────────────────────────────────────┐
-│              corporate-proxy.intern:8080                           │
+│              corporate-proxy.corp:8080                            │
 │                                                                   │
-│  - valideert client certificaat tegen ca.crt                      │
-│  - valideert Proxy-Authorization                                  │
-│  - ziet absolute URI in request-line → weet bestemming            │
-│  - forward naar volgende hop of rechtstreeks                      │
+│  - validates client certificate against ca.crt                   │
+│  - validates Proxy-Authorization                                  │
+│  - sees absolute URI in request-line → knows destination          │
+│  - forwards to next hop or directly                               │
 └───────────────────────────────────────────────────────────────────┘
                           │
-                          │  (TLS naar upstream chain of plain HTTP)
+                          │  (TLS to upstream chain or plain HTTP)
                           ▼
-                 [volgende proxies in chain]
+                 [next proxies in chain]
                           │
                           ▼
 ┌───────────────────────────────────────────────────────────────────┐
-│              externe Squid (absolute-form parser) ✅               │
+│              external Squid (absolute-form parser) ✅             │
 │                                                                   │
-│  Krijgt: GET http://example.com/path HTTP/1.1                     │
-│  Parseert absolute URI correct                                    │
-│  Forward naar example.com                                         │
+│  Receives: GET http://example.com/path HTTP/1.1                   │
+│  Parses absolute URI correctly                                    │
+│  Forwards to example.com                                          │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
 ## Threading model
 
-De Go runtime gebruikt M:N scheduling. Elk inkomend request spawnt een
-goroutine via `http.Server`. Binnen die goroutine:
+Each incoming request spawns a goroutine via `http.Server`.
 
-- `handleHTTPForward` is synchronous van binnen: lees ACL, dial upstream,
-  schrijf request, lees response. Geen extra goroutines behalve die `net/http`
-  intern gebruikt.
-- `handleConnect` spawnt 2 goroutines voor bidirectionele tunnel kopie
-  (client→upstream en upstream→client). Deze eindigen als één kant EOF/close
-  krijgt.
+- `handleHTTPForward` is synchronous within the goroutine: ACL check, dial
+  upstream, write request, read response. No extra goroutines.
+- `handleConnect` spawns 2 goroutines for bidirectional tunnel copy
+  (client→upstream and upstream→client), which end when either side closes.
 
-Gedeelde state is thread-safe:
+Shared state is thread-safe:
 
-- `serviceentry.Watcher` gebruikt `sync.RWMutex` voor de allowlist map
-- `certs.Manager` gebruikt `atomic.Pointer[tls.Config]` voor lock-vrije
-  reads
-- Prometheus counters zijn thread-safe by design
+- `serviceentry.Watcher` uses `sync.RWMutex` for the allowlist map
+- `certs.Manager` uses `atomic.Pointer[tls.Config]` for lock-free reads
+- Prometheus counters are thread-safe by design
 
-## Fail-modes
+## Failure modes
 
-| Scenario | Gedrag |
+| Scenario | Behavior |
 |---|---|
-| ServiceEntry watcher niet synced | `/readyz` returnt 503, kubelet houdt pod uit Service |
-| Cert file ontbreekt bij start | Pod crasht, kubelet restart; pas na succes wordt pod Ready |
-| Cert file corrupt tijdens rotatie | Oude config blijft actief; error wordt gelogd |
-| Upstream onbereikbaar | 502 Bad Gateway naar client, metric counter +1 |
-| ACL miss | 403 Forbidden, audit log met deny_reason |
-| Client disconnect midden in forward | Goroutine eindigt clean door io.Copy |
-| ztunnel faalt | Client requests halen proxy niet, geen impact op bestaande tunnels |
+| ServiceEntry watcher not synced | `/readyz` returns 503, kubelet keeps pod out of Service |
+| Cert file missing at startup | Pod crashes, kubelet restarts; pod only becomes Ready after success |
+| Cert file corrupt during rotation | Old config remains active; error is logged |
+| Upstream unreachable | 502 Bad Gateway to client, dial error counter incremented |
+| ACL miss | 403 Forbidden, audit log with deny_reason |
+| Client disconnect mid-forward | Goroutine exits cleanly via io.Copy |
+| ztunnel failure | Client requests do not reach proxy; no impact on existing tunnels |
 
-## Waarom geen GatewayClass controller?
+## Why not a GatewayClass controller?
 
-De originele discussie ging uit van een custom GatewayClass. Voor een
-**centrale platform-team proxy** is dat over-engineering: één Deployment
-volstaat. Een GatewayClass controller is waardevol als:
+For a **central platform-team proxy**, a single Deployment is sufficient. A
+GatewayClass controller adds value when:
 
-- Teams zelf instanties provisioneren via hun eigen `Gateway` objects
-- Elke instantie andere configuratie moet hebben (andere upstream, andere ACL)
-- Er een zelfbediening-model nodig is
+- Teams self-provision instances via their own `Gateway` objects
+- Each instance needs a different configuration (upstream, ACL)
+- A self-service model is required
 
-Bij één gedeelde proxy voegt de GatewayClass laag complexiteit toe zonder
-waarde. De Helm chart is de juiste abstractie hier.
+With one shared proxy the Helm chart is the right abstraction.
 
-## Waarom geen sidecar injection?
+## Why no sidecar injection?
 
-De forward proxy pod draait **in ambient mesh** via `dataplane-mode=ambient`
-label, niet via sidecar. Dit betekent:
+The forward proxy pod runs **in ambient mesh** via the `dataplane-mode=ambient`
+label, not via a sidecar. This means:
 
-- Ztunnel handelt L4 mTLS af voor inkomend verkeer
-- Geen Envoy sidecar overhead
-- `PeerAuthentication: STRICT` dwingt af dat verkeer alleen via ztunnel komt
-- `AuthorizationPolicy` kan L4 (namespace/principal) + L7 (path/method) zijn
-- Voor L7 regels op de proxy zelf zou een waypoint nodig zijn (niet
-  geconfigureerd want niet vereist)
+- ztunnel handles L4 mTLS for inbound traffic
+- No Envoy sidecar overhead
+- `PeerAuthentication: STRICT` enforces that traffic only arrives via ztunnel
+- `AuthorizationPolicy` can enforce L4 (namespace/principal) and L7 (path/method)
 
-## Waarom mTLS met upstream en niet met client?
+## Why mTLS to upstream but not to the client?
 
-- **Client → proxy**: al versleuteld door ztunnel HBONE mTLS. Dubbel doen
-  is overhead zonder winst.
-- **Proxy → upstream**: upstream zit buiten de mesh, HBONE is daar niet.
-  Expliciete mTLS met eigen client cert is de enige manier om authenticiteit
-  en vertrouwelijkheid te garanderen.
+- **Client → proxy**: already encrypted by ztunnel HBONE mTLS. Double-encrypting
+  adds overhead without benefit.
+- **Proxy → upstream**: the upstream is outside the mesh; HBONE is not available.
+  Explicit mTLS with a client certificate is the only way to guarantee
+  authenticity and confidentiality.
 
-Dit komt exact overeen met de Istio TLS origination pattern uit de
+This mirrors the Istio TLS origination pattern from the
 [DestinationRule MUTUAL](https://istio.io/latest/docs/tasks/traffic-management/egress/egress-tls-origination/#mutual-tls-origination-for-egress-traffic)
-documentatie.
+documentation.

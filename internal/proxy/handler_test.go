@@ -8,10 +8,9 @@ import (
 	"testing"
 )
 
-// TestAbsolutePathPreservation verifieert het kernkenmerk van deze proxy:
-// de request-line naar de upstream behoudt de ABSOLUTE URI, zoals vereist
-// door RFC 7230 §5.3.2 voor proxy requests. Dit is waar Envoy faalt voor
-// dit gebruik.
+// TestAbsolutePathPreservation verifies the core property of this proxy:
+// the request-line sent to the upstream preserves the ABSOLUTE URI as
+// required by RFC 7230 §5.3.2 for proxy requests.
 func TestAbsolutePathPreservation(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -20,19 +19,19 @@ func TestAbsolutePathPreservation(t *testing.T) {
 		wantLine string
 	}{
 		{
-			name:     "simpel GET",
+			name:     "simple GET",
 			inputURL: "http://edition.cnn.com/politics",
 			method:   "GET",
 			wantLine: "GET http://edition.cnn.com/politics HTTP/1.1",
 		},
 		{
-			name:     "met query string",
+			name:     "with query string",
 			inputURL: "http://api.example.com/v1/users?page=2&limit=50",
 			method:   "GET",
 			wantLine: "GET http://api.example.com/v1/users?page=2&limit=50 HTTP/1.1",
 		},
 		{
-			name:     "met expliciete poort",
+			name:     "with explicit port",
 			inputURL: "http://internal.corp:8080/healthz",
 			method:   "GET",
 			wantLine: "GET http://internal.corp:8080/healthz HTTP/1.1",
@@ -62,8 +61,8 @@ func TestAbsolutePathPreservation(t *testing.T) {
 	}
 }
 
-// TestProxyAuthorizationInjected verifieert dat de Proxy-Authorization header
-// correct wordt toegevoegd naar upstream.
+// TestProxyAuthorizationInjected verifies that the Proxy-Authorization header
+// is correctly added to upstream requests.
 func TestProxyAuthorizationInjected(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	h := &Handler{UpstreamAuth: "Basic dXNlcjpwYXNz"}
@@ -78,8 +77,8 @@ func TestProxyAuthorizationInjected(t *testing.T) {
 	}
 }
 
-// TestHopByHopHeadersStripped verifieert dat hop-by-hop headers van de
-// client NIET worden doorgezet naar upstream.
+// TestHopByHopHeadersStripped verifies that hop-by-hop headers from the client
+// are not forwarded to the upstream.
 func TestHopByHopHeadersStripped(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	req.Header.Set("Connection", "close")
@@ -111,8 +110,7 @@ func TestHopByHopHeadersStripped(t *testing.T) {
 	}
 }
 
-// TestExtraHeadersAppended verifieert dat geconfigureerde extra headers
-// meegestuurd worden.
+// TestExtraHeadersAppended verifies that configured extra headers are forwarded.
 func TestExtraHeadersAppended(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	h := &Handler{
@@ -134,7 +132,7 @@ func TestExtraHeadersAppended(t *testing.T) {
 	}
 }
 
-// TestHostHeaderSet verifieert dat de Host header correct gezet wordt.
+// TestHostHeaderSet verifies that the Host header is set correctly.
 func TestHostHeaderSet(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com:8080/path", nil)
 	h := &Handler{}
@@ -142,7 +140,6 @@ func TestHostHeaderSet(t *testing.T) {
 	if err := h.writeProxyRequest(&nopWriteConn{Builder: &buf}, req); err != nil {
 		t.Fatal(err)
 	}
-	// Eerste regel is request-line, daarna Host header
 	br := bufio.NewReader(strings.NewReader(buf.String()))
 	_, _ = br.ReadString('\n') // skip request-line
 	line, _ := br.ReadString('\n')
@@ -154,9 +151,8 @@ func TestHostHeaderSet(t *testing.T) {
 	}
 }
 
-// TestNonAbsoluteURIRejected verifieert dat non-proxy requests 400 krijgen.
+// TestNonAbsoluteURIRejected verifies that non-proxy requests receive a 400.
 func TestNonAbsoluteURIRejected(t *testing.T) {
-	// Bouw manueel een request met een relatieve URI
 	req := httptest.NewRequest("GET", "/relative", nil)
 	req.URL.Scheme = ""
 	req.URL.Host = ""
@@ -170,7 +166,7 @@ func TestNonAbsoluteURIRejected(t *testing.T) {
 	}
 }
 
-// nopWriteConn voldoet aan io.Writer. writeProxyRequest gebruikt alleen Write.
+// nopWriteConn satisfies io.Writer for writeProxyRequest tests.
 type nopWriteConn struct {
 	*strings.Builder
 }

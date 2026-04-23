@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# End-to-end test script voor de istio-forward-proxy.
+# End-to-end test script for istio-forward-proxy.
 #
-# Dit script test:
-#   1. Dat de proxy reageert en healthy is
-#   2. Dat ServiceEntry-geregistreerde hosts worden toegestaan
-#   3. Dat niet-geregistreerde hosts worden geweigerd (403)
-#   4. Dat het request naar upstream een ABSOLUUT pad heeft
-#   5. Dat hop-by-hop headers correct worden gestript
-#   6. Dat mTLS naar upstream werkt met client certificaat
-#   7. Dat metrics endpoint data levert
+# Tests:
+#   1. Proxy is running and healthy
+#   2. ServiceEntry-registered hosts are allowed
+#   3. Unregistered hosts are denied (403)
+#   4. Requests to upstream contain an ABSOLUTE path
+#   5. Hop-by-hop headers are correctly stripped
+#   6. mTLS to upstream works with client certificate
+#   7. Metrics endpoint returns data
 #
-# Vereisten:
-#   - kubectl met cluster admin
-#   - Istio ambient mode geinstalleerd
-#   - cert-manager met een werkende ClusterIssuer
-#   - De proxy geinstalleerd via Helm
+# Prerequisites:
+#   - kubectl with cluster admin
+#   - Istio ambient mode installed
+#   - cert-manager with a working ClusterIssuer
+#   - The proxy installed via Helm
 
 set -euo pipefail
 
@@ -38,16 +38,16 @@ cleanup() {
 trap cleanup EXIT
 
 # -----------------------------------------------------------------------------
-step "1. Check dat de proxy draait"
+step "1. Check proxy is running"
 # -----------------------------------------------------------------------------
 if ! kubectl -n "$PROXY_NS" get deployment "$PROXY_NAME" >/dev/null 2>&1; then
-  fail "Deployment $PROXY_NAME niet gevonden in namespace $PROXY_NS"
+  fail "Deployment $PROXY_NAME not found in namespace $PROXY_NS"
 fi
 kubectl -n "$PROXY_NS" rollout status deployment/"$PROXY_NAME" --timeout=120s
 pass "Proxy deployment ready"
 
 # -----------------------------------------------------------------------------
-step "2. Maak test namespace en client pod"
+step "2. Create test namespace and client pod"
 # -----------------------------------------------------------------------------
 kubectl create namespace "$TEST_NS" --dry-run=client -o yaml | \
   kubectl label --local -f - istio.io/dataplane-mode=ambient -o yaml | \
@@ -87,7 +87,7 @@ kubectl -n "$TEST_NS" wait --for=condition=Ready pod/test-client --timeout=60s
 pass "Test client pod ready, HTTP_PROXY=${PROXY_URL}"
 
 # -----------------------------------------------------------------------------
-step "3. Test dat niet-geregistreerde host wordt geweigerd (403)"
+step "3. Unregistered host is denied (403)"
 # -----------------------------------------------------------------------------
 set +e
 OUTPUT=$(kubectl -n "$TEST_NS" exec test-client -c curl -- \
@@ -95,13 +95,13 @@ OUTPUT=$(kubectl -n "$TEST_NS" exec test-client -c curl -- \
 set -e
 
 if [[ "$OUTPUT" == "403" ]]; then
-  pass "Niet-geregistreerde host correct geweigerd met 403"
+  pass "Unregistered host correctly denied with 403"
 else
-  fail "Expected 403 voor niet-geregistreerde host, got: $OUTPUT"
+  fail "Expected 403 for unregistered host, got: $OUTPUT"
 fi
 
 # -----------------------------------------------------------------------------
-step "4. Registreer httpbin.org als ServiceEntry"
+step "4. Register httpbin.org as ServiceEntry"
 # -----------------------------------------------------------------------------
 cat <<EOF | kubectl apply -f -
 apiVersion: networking.istio.io/v1
@@ -123,41 +123,39 @@ spec:
   location: MESH_EXTERNAL
 EOF
 
-# ServiceEntry watch heeft een korte propagatie nodig
-log "Wachten tot ServiceEntry in de allowlist staat..."
+log "Waiting for ServiceEntry to appear in allowlist..."
 for i in $(seq 1 20); do
   ALLOWLIST=$(kubectl -n "$PROXY_NS" exec deploy/"$PROXY_NAME" -- \
     wget -q -O - http://localhost:9090/debug/allowlist 2>/dev/null || true)
   if echo "$ALLOWLIST" | grep -q "httpbin.org"; then
-    pass "httpbin.org staat in allowlist"
+    pass "httpbin.org is in allowlist"
     break
   fi
   sleep 1
-  [[ $i -eq 20 ]] && fail "ServiceEntry niet zichtbaar in allowlist na 20s"
+  [[ $i -eq 20 ]] && fail "ServiceEntry not visible in allowlist after 20s"
 done
 
 # -----------------------------------------------------------------------------
-step "5. Test dat geregistreerde host wordt toegestaan"
+step "5. Registered host is allowed"
 # -----------------------------------------------------------------------------
-# NB: dit vereist dat je upstream proxy daadwerkelijk naar httpbin.org kan.
-# Als je test draait in een lab zonder internet, vervang dit door een
-# mock upstream (zie verderop).
+# Note: requires the upstream proxy to have internet access.
+# In lab environments without internet, use a mock upstream instead.
 set +e
 STATUS=$(kubectl -n "$TEST_NS" exec test-client -c curl -- \
   curl -sS -o /dev/null -w "%{http_code}" http://httpbin.org/get 2>&1 || echo "FAIL")
 set -e
 
 if [[ "$STATUS" =~ ^(200|301|302)$ ]]; then
-  pass "httpbin.org call succesvol (status $STATUS)"
+  pass "httpbin.org request succeeded (status $STATUS)"
 else
-  log "WAARSCHUWING: status $STATUS (mogelijk heeft upstream geen internet)"
+  log "WARNING: status $STATUS (upstream may not have internet access)"
 fi
 
 # -----------------------------------------------------------------------------
-step "6. Verifieer dat upstream ABSOLUTE paden ontvangt"
+step "6. Verify upstream receives ABSOLUTE paths"
 # -----------------------------------------------------------------------------
-# We deployen een mock upstream die elk request logt, dan sturen we er
-# een aantal requests doorheen en controleren de log.
+# Deploy a mock upstream that logs every request, then send requests through
+# the proxy and inspect the log.
 kubectl create namespace "$MOCK_UPSTREAM_NS" --dry-run=client -o yaml | kubectl apply -f -
 
 cat <<'MOCK_EOF' | kubectl apply -n "$MOCK_UPSTREAM_NS" -f -
@@ -173,7 +171,6 @@ data:
       access_log /dev/stdout requestline;
       server {
         listen 8080;
-        # Accepteer elk path (incl. absoluut), return 200 met de request-line
         location / {
           add_header Content-Type text/plain;
           return 200 "received: $request\n";
@@ -215,37 +212,36 @@ spec:
 MOCK_EOF
 
 kubectl -n "$MOCK_UPSTREAM_NS" rollout status deployment/mock-upstream --timeout=60s
-log "Mock upstream gereed op mock-upstream.${MOCK_UPSTREAM_NS}.svc.cluster.local:8080"
+log "Mock upstream ready at mock-upstream.${MOCK_UPSTREAM_NS}.svc.cluster.local:8080"
 
-log "NOTE: Voor een volledige test moet je de proxy tijdelijk laten wijzen naar"
-log "      de mock upstream. Dat doe je met: helm upgrade --set proxy.upstream.host="
-log "      mock-upstream.${MOCK_UPSTREAM_NS}.svc.cluster.local:8080 --set proxy.mtls.enabled=false"
-log "      Daarna: kubectl exec test-client -- curl http://httpbin.org/foo"
-log "      En check de mock-upstream log: het moet 'GET http://httpbin.org/foo HTTP/1.1' bevatten"
+log "NOTE: For a full absolute-path test, temporarily point the proxy at the mock upstream:"
+log "      helm upgrade --set proxy.upstream.host=mock-upstream.${MOCK_UPSTREAM_NS}.svc.cluster.local:8080"
+log "      Then: kubectl exec test-client -- curl http://httpbin.org/foo"
+log "      And check mock-upstream log: it must contain 'GET http://httpbin.org/foo HTTP/1.1'"
 
 # -----------------------------------------------------------------------------
-step "7. Metrics endpoint levert data"
+step "7. Metrics endpoint returns data"
 # -----------------------------------------------------------------------------
 METRICS=$(kubectl -n "$PROXY_NS" exec deploy/"$PROXY_NAME" -- \
   wget -q -O - http://localhost:9090/metrics 2>/dev/null)
 
 for metric in forward_proxy_requests_total forward_proxy_active_connections; do
   if echo "$METRICS" | grep -q "^${metric}"; then
-    pass "Metric $metric aanwezig"
+    pass "Metric $metric present"
   else
-    fail "Metric $metric ontbreekt"
+    fail "Metric $metric missing"
   fi
 done
 
 # -----------------------------------------------------------------------------
-step "8. Audit log bevat structured events"
+step "8. Audit log contains structured events"
 # -----------------------------------------------------------------------------
-log "Laatste audit events:"
+log "Recent audit events:"
 kubectl -n "$PROXY_NS" logs deployment/"$PROXY_NAME" --tail=20 | \
-  grep -E 'egress|"method"' || log "Geen audit events gevonden (mogelijk nog geen traffic)"
+  grep -E 'egress|"method"' || log "No audit events found (no traffic yet)"
 
 # -----------------------------------------------------------------------------
 echo ""
 echo "============================================================"
-echo " ALLE TESTS GESLAAGD"
+echo " ALL TESTS PASSED"
 echo "============================================================"

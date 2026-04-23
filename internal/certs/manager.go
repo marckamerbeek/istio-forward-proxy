@@ -1,10 +1,10 @@
-// Package certs beheert client certificaten voor mTLS origination naar de
-// upstream proxy. Het leest tls.crt, tls.key en ca.crt uit een directory
-// (doorgaans een gemount Kubernetes Secret) en laadt deze opnieuw wanneer
-// cert-manager de certificaten roteert.
+// Package certs manages client certificates for mTLS origination to the
+// upstream proxy. It reads tls.crt, tls.key, and ca.crt from a directory
+// (typically a mounted Kubernetes Secret) and hot-reloads them when
+// cert-manager rotates the certificates.
 //
-// Dit is het equivalent van DestinationRule met credentialName in Istio,
-// maar dan native in Go zonder Envoy ertussen.
+// This is the Go-native equivalent of a DestinationRule with credentialName
+// in Istio, without Envoy in the path.
 package certs
 
 import (
@@ -21,17 +21,16 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// Manager houdt de huidige TLS configuratie bij en watcht bestanden voor
-// rotatie. Gebruik TLSConfig() om de meest recente config te krijgen.
+// Manager holds the current TLS configuration and watches for certificate
+// rotation. Call TLSConfig() to get the most recent config.
 type Manager struct {
 	dir     string
 	logger  *slog.Logger
 	current atomic.Pointer[tls.Config]
 }
 
-// NewManager laadt de initiele certificaten en returned een manager. Als de
-// certificaten niet leesbaar zijn returnt het een error zodat de pod niet
-// opstart in een broken state.
+// NewManager loads the initial certificates and returns a manager. Returns an
+// error if the certificates cannot be read, preventing startup in a broken state.
 func NewManager(dir string, logger *slog.Logger) (*Manager, error) {
 	m := &Manager{dir: dir, logger: logger}
 	if err := m.reload(); err != nil {
@@ -40,13 +39,13 @@ func NewManager(dir string, logger *slog.Logger) (*Manager, error) {
 	return m, nil
 }
 
-// TLSConfig returned de meest recent geladen TLS config. Deze is veilig om
-// te delen over goroutines want we gebruiken atomic pointers.
+// TLSConfig returns the most recently loaded TLS config. Safe for concurrent
+// use via atomic pointer.
 func (m *Manager) TLSConfig() *tls.Config {
 	return m.current.Load()
 }
 
-// reload leest alle bestanden opnieuw en atomair swapt de huidige config.
+// reload reads all certificate files and atomically swaps the current config.
 func (m *Manager) reload() error {
 	certPath := filepath.Join(m.dir, "tls.crt")
 	keyPath := filepath.Join(m.dir, "tls.key")
@@ -81,9 +80,9 @@ func (m *Manager) reload() error {
 	return nil
 }
 
-// Watch blokkeert tot ctx klaar is en reload certificaten bij elke wijziging.
-// Kubernetes Secrets die als volume worden gemount gebruiken symlinks die
-// atomair swappen; fsnotify vangt dit via de CREATE event op de parent dir.
+// Watch blocks until ctx is done, reloading certificates on every file change.
+// Kubernetes Secrets mounted as volumes use symlinks that swap atomically;
+// fsnotify catches this via CREATE events on the parent directory.
 func (m *Manager) Watch(ctx context.Context) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -107,8 +106,8 @@ func (m *Manager) Watch(ctx context.Context) {
 			if !ok {
 				return
 			}
-			// Kubernetes Secret rotations trigger een CREATE event op de
-			// ..data symlink. Ook WRITE/REMOVE events pakken we mee.
+			// Kubernetes Secret rotations trigger a CREATE event on the
+			// ..data symlink. WRITE/REMOVE/RENAME events are also handled.
 			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) != 0 {
 				m.logger.Debug("cert file event", "event", event.String())
 				if err := m.reload(); err != nil {

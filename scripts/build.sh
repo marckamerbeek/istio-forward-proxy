@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Build de istio-forward-proxy Docker image.
+# Build the istio-forward-proxy Docker image.
 #
-# Environment variabelen:
-#   IMAGE_REPO   - registry + repo (default: localhost/istio-forward-proxy)
-#   IMAGE_TAG    - tag (default: git commit short hash, fallback: dev)
+# Environment variables:
+#   IMAGE_REPO   - registry + repository (default: localhost/istio-forward-proxy)
+#   IMAGE_TAG    - tag (default: git short commit hash, fallback: dev)
 #   PLATFORMS    - docker buildx platforms (default: linux/amd64)
-#   PUSH         - set PUSH=1 om meteen te pushen met buildx
+#   PUSH         - set PUSH=1 to push with buildx after build
 #
-# Gebruik:
+# Examples:
 #   ./scripts/build.sh
 #   IMAGE_TAG=v0.1.0 PUSH=1 ./scripts/build.sh
 #   IMAGE_REPO=registry.corp/platform/istio-forward-proxy PUSH=1 ./scripts/build.sh
@@ -45,7 +45,7 @@ if [[ "${PUSH:-0}" == "1" ]]; then
     --push \
     .
 else
-  # Lokale build (single-platform)
+  # Local single-platform build
   docker build "${BUILD_ARGS[@]}" .
 fi
 

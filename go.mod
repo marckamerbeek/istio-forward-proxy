@@ -1,4 +1,4 @@
-module github.com/example/istio-forward-proxy
+module github.com/marckamerbeek/istio-forward-proxy
 
 go 1.22
 

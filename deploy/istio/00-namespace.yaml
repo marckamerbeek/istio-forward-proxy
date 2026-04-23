@@ -1,16 +1,15 @@
-# Namespace voor de centrale forward proxy.
-# Voer uit VOOR de helm install om de namespace correct te labelen.
+# Namespace for the central forward proxy.
+# Apply this BEFORE helm install to ensure the namespace is correctly labeled.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: istio-egress
   labels:
-    # Zorgt dat ztunnel deze namespace als ambient deelnemer behandelt
+    # Opt the namespace into Istio ambient mode
     istio.io/dataplane-mode: ambient
-    # Label zodat NetworkPolicies met namespaceSelector deze namespace
-    # kunnen vinden
+    # Required for NetworkPolicy namespaceSelector matching
     kubernetes.io/metadata.name: istio-egress
-    # Pod Security Admission: baseline is genoeg voor distroless nonroot
+    # Pod Security Admission: restricted is sufficient for distroless nonroot
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted

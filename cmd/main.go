@@ -1,13 +1,13 @@
-// Package main is the entrypoint for the istio-forward-proxy.
+// Package main is the entrypoint for istio-forward-proxy.
 //
-// Dit programma implementeert een forward proxy die het gedrag nabootst van
-// Istio's TLS origination via DestinationRule + ServiceEntry, maar met één
-// cruciaal verschil: het behoudt het absolute pad in HTTP request-lines zodat
-// downstream Squid/HTTP proxies er correct mee om kunnen gaan.
+// The proxy preserves the absolute path in HTTP request-lines so that
+// downstream Squid/HTTP proxies receive requests in the correct proxy form
+// (RFC 7230 §5.3.2). Envoy's TLS origination rewrites to relative paths,
+// which breaks proxy chains that require absolute-form requests.
 //
-// De proxy heeft twee modi:
-//  1. Plain HTTP forward met mTLS origination naar upstream (absolute path)
-//  2. CONNECT tunnel forwarding voor HTTPS verkeer met mTLS naar upstream
+// Two modes are supported:
+//  1. Plain HTTP forward with mTLS origination to upstream (absolute path)
+//  2. CONNECT tunnel forwarding for HTTPS traffic with mTLS to upstream
 package main
 
 import (
@@ -20,10 +20,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/example/istio-forward-proxy/internal/audit"
-	"github.com/example/istio-forward-proxy/internal/certs"
-	"github.com/example/istio-forward-proxy/internal/proxy"
-	"github.com/example/istio-forward-proxy/internal/serviceentry"
+	"github.com/marckamerbeek/istio-forward-proxy/internal/audit"
+	"github.com/marckamerbeek/istio-forward-proxy/internal/certs"
+	"github.com/marckamerbeek/istio-forward-proxy/internal/proxy"
+	"github.com/marckamerbeek/istio-forward-proxy/internal/serviceentry"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -45,7 +45,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Certificate manager: leest Secret met client cert + CA, watcht voor rotatie
+	// Certificate manager: reads client cert + CA from a Secret volume, watches for rotation.
 	var certManager *certs.Manager
 	if cfg.mtlsEnabled {
 		var err error
@@ -57,7 +57,7 @@ func main() {
 		go certManager.Watch(ctx)
 	}
 
-	// ServiceEntry watcher: bouwt ACL whitelist
+	// ServiceEntry watcher: builds the ACL allowlist from cluster ServiceEntries.
 	seWatcher, err := serviceentry.NewWatcher(logger)
 	if err != nil {
 		logger.Error("failed to initialize ServiceEntry watcher", "error", err)
@@ -65,25 +65,22 @@ func main() {
 	}
 	go seWatcher.Run(ctx)
 
-	// Audit logger
 	auditLogger := audit.New(logger)
 
-	// Proxy handler
 	handler := &proxy.Handler{
-		UpstreamProxy:     cfg.upstreamProxy,
-		UpstreamAuth:      cfg.upstreamAuth,
-		CertManager:       certManager,
-		ACL:               seWatcher,
-		Audit:             auditLogger,
-		ExtraHeaders:      cfg.extraHeaders,
-		DialTimeout:       cfg.dialTimeout,
-		IdleTimeout:       cfg.idleTimeout,
-		TLSEnabled:        cfg.mtlsEnabled,
+		UpstreamProxy:      cfg.upstreamProxy,
+		UpstreamAuth:       cfg.upstreamAuth,
+		CertManager:        certManager,
+		ACL:                seWatcher,
+		Audit:              auditLogger,
+		ExtraHeaders:       cfg.extraHeaders,
+		DialTimeout:        cfg.dialTimeout,
+		IdleTimeout:        cfg.idleTimeout,
+		TLSEnabled:         cfg.mtlsEnabled,
 		InsecureSkipVerify: cfg.insecureSkipVerify,
-		Logger:            logger,
+		Logger:             logger,
 	}
 
-	// Metrics server op aparte poort
 	metricsServer := &http.Server{
 		Addr:    cfg.metricsAddr,
 		Handler: metricsMux(seWatcher),
@@ -95,7 +92,6 @@ func main() {
 		}
 	}()
 
-	// Hoofdproxy server
 	proxyServer := &http.Server{
 		Addr:         cfg.listenAddr,
 		Handler:      handler,
@@ -111,7 +107,6 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -146,7 +141,6 @@ func metricsMux(seWatcher *serviceentry.Watcher) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ready"))
 	})
-	// Debug endpoint: toont huidige allowlist
 	mux.HandleFunc("/debug/allowlist", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		seWatcher.DumpJSON(w)
@@ -190,7 +184,7 @@ func parseFlags() *config {
 	flag.BoolVar(&cfg.mtlsEnabled, "mtls", envOrBool("MTLS_ENABLED", true),
 		"enable mTLS origination to upstream proxy")
 	flag.BoolVar(&cfg.insecureSkipVerify, "insecure-skip-verify", envOrBool("INSECURE_SKIP_VERIFY", false),
-		"skip TLS verification of upstream (testing only, NEVER production)")
+		"skip TLS verification of upstream (testing only, never use in production)")
 	flag.DurationVar(&cfg.dialTimeout, "dial-timeout", 10*time.Second,
 		"timeout for upstream dial")
 	flag.DurationVar(&cfg.idleTimeout, "idle-timeout", 90*time.Second,
@@ -207,7 +201,7 @@ func parseFlags() *config {
 		os.Exit(2)
 	}
 
-	// Parse extra headers from env: EXTRA_HEADER_X_CORP_ID=value1 becomes X-Corp-Id: value1
+	// Parse extra headers from env: EXTRA_HEADER_X_CORP_ID=value becomes X-Corp-Id: value
 	for _, e := range os.Environ() {
 		if len(e) > len("EXTRA_HEADER_") && e[:len("EXTRA_HEADER_")] == "EXTRA_HEADER_" {
 			rest := e[len("EXTRA_HEADER_"):]
@@ -224,8 +218,8 @@ func parseFlags() *config {
 	return cfg
 }
 
+// headerNameFromEnv converts X_CORP_ID to X-Corp-Id.
 func headerNameFromEnv(s string) string {
-	// Convert X_CORP_ID -> X-Corp-Id
 	out := make([]byte, 0, len(s))
 	upper := true
 	for i := 0; i < len(s); i++ {

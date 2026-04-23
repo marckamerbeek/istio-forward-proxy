@@ -1,19 +1,19 @@
-// Package proxy implementeert de core forward proxy logica. Het ondersteunt:
+// Package proxy implements the core forward proxy logic. Two request types
+// are handled:
 //
-//  1. HTTP forward met absolute path preservatie. De proxy ontvangt een
-//     request met absolute URI (GET http://host/path HTTP/1.1), valideert
-//     de host tegen de ACL, opent een mTLS verbinding naar de upstream
-//     proxy en stuurt het request door met absolute URI behouden.
+//  1. HTTP forward with absolute path preservation. The proxy receives a
+//     request with an absolute URI (GET http://host/path HTTP/1.1), validates
+//     the host against the ACL, opens an mTLS connection to the upstream
+//     proxy, and forwards the request with the absolute URI intact.
 //
-//  2. CONNECT tunnel. Voor HTTPS verkeer krijgt de proxy een CONNECT
-//     request. Na ACL check wordt een mTLS verbinding naar de upstream
-//     geopend, de CONNECT wordt doorgestuurd, en na 200 Connection
-//     established tunnelen we TCP bidirectioneel.
+//  2. CONNECT tunnel for HTTPS traffic. After an ACL check the proxy opens
+//     an mTLS connection to the upstream, forwards the CONNECT, and tunnels
+//     TCP bidirectionally after a 200 Connection Established response.
 //
-// Het cruciale verschil met Envoy's TLS origination is dat wij de absolute
-// request-line NIET herschrijven naar een relatief path. Envoy doet dat per
-// RFC 7230 §5.3.1 voor origin servers; wij behouden het absoluut pad omdat
-// de upstream een proxy is (RFC 7230 §5.3.2).
+// The key difference from Envoy's TLS origination is that the absolute
+// request-line is NOT rewritten to a relative path. Envoy does this per
+// RFC 7230 §5.3.1 (for origin servers); this proxy keeps the absolute form
+// because the upstream is a proxy (RFC 7230 §5.3.2).
 package proxy
 
 import (
@@ -32,9 +32,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/example/istio-forward-proxy/internal/audit"
-	"github.com/example/istio-forward-proxy/internal/certs"
-	"github.com/example/istio-forward-proxy/internal/serviceentry"
+	"github.com/marckamerbeek/istio-forward-proxy/internal/audit"
+	"github.com/marckamerbeek/istio-forward-proxy/internal/certs"
+	"github.com/marckamerbeek/istio-forward-proxy/internal/serviceentry"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -62,10 +62,10 @@ var (
 	}, []string{"direction"})
 )
 
-// Handler implementeert http.Handler. Het dispatched naar de juiste flow
-// op basis van de request methode (CONNECT vs anders).
+// Handler implements http.Handler, dispatching to the appropriate flow
+// based on the request method (CONNECT vs plain HTTP).
 type Handler struct {
-	UpstreamProxy      string // host:port van upstream proxy
+	UpstreamProxy      string // host:port of the upstream proxy
 	UpstreamAuth       string // Proxy-Authorization header value
 	CertManager        *certs.Manager
 	ACL                *serviceentry.Watcher
@@ -87,14 +87,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // -----------------------------------------------------------------------------
-// HTTP forward met absolute path preservatie
+// HTTP forward with absolute path preservation
 // -----------------------------------------------------------------------------
 
 func (h *Handler) handleHTTPForward(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	// Een forward proxy request MOET een absolute URI hebben (RFC 7230 §5.3.2).
-	// We checken dat de URL scheme heeft (http/https) en een Host.
+	// A forward proxy request must carry an absolute URI (RFC 7230 §5.3.2).
 	if !r.URL.IsAbs() || r.URL.Host == "" {
 		http.Error(w, "proxy request requires absolute URI", http.StatusBadRequest)
 		requestsTotal.WithLabelValues("HTTP", "bad_request").Inc()
@@ -103,14 +102,12 @@ func (h *Handler) handleHTTPForward(w http.ResponseWriter, r *http.Request) {
 
 	targetHost, targetPort := splitHostPort(r.URL.Host, defaultPortForScheme(r.URL.Scheme))
 
-	// ACL check via ServiceEntry allowlist
 	allow, _ := h.ACL.AllowHost(targetHost, targetPort)
 	if !allow {
 		h.denyForward(w, r, targetHost, targetPort, "host_not_in_service_entry_allowlist")
 		return
 	}
 
-	// Connect naar upstream proxy
 	upstream, err := h.dialUpstream()
 	if err != nil {
 		upstreamDialErrors.Inc()
@@ -127,13 +124,9 @@ func (h *Handler) handleHTTPForward(w http.ResponseWriter, r *http.Request) {
 		h.Logger.Debug("set deadline failed", "error", err)
 	}
 
-	// Schrijf request naar upstream met ABSOLUUT pad. Dit is de kern van wat
-	// Envoy fout doet: Envoy zou schrijven:
-	//   GET /path HTTP/1.1
-	// Wij schrijven:
-	//   GET http://host:port/path HTTP/1.1
-	// Dit is conform RFC 7230 §5.3.2 (absolute-form, vereist voor requests
-	// naar een proxy).
+	// Write request with ABSOLUTE URI intact. This is the core difference from
+	// Envoy, which would write: GET /path HTTP/1.1
+	// We write:                 GET http://host:port/path HTTP/1.1
 	if err := h.writeProxyRequest(upstream, r); err != nil {
 		h.Logger.Error("write upstream request failed", "error", err)
 		http.Error(w, "upstream write failed", http.StatusBadGateway)
@@ -141,8 +134,6 @@ func (h *Handler) handleHTTPForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Lees response van upstream en kopieer naar client. Gebruik een bufio
-	// reader om http.ReadResponse te kunnen gebruiken; die parseert headers.
 	br := bufio.NewReader(upstream)
 	resp, err := http.ReadResponse(br, r)
 	if err != nil {
@@ -153,9 +144,7 @@ func (h *Handler) handleHTTPForward(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Kopieer headers en status naar client
 	for k, vv := range resp.Header {
-		// Hop-by-hop headers niet doorzetten
 		if isHopByHop(k) {
 			continue
 		}
@@ -183,19 +172,15 @@ func (h *Handler) handleHTTPForward(w http.ResponseWriter, r *http.Request) {
 	requestsTotal.WithLabelValues("HTTP", "allow").Inc()
 }
 
-// writeProxyRequest schrijft een HTTP/1.1 request naar de upstream connection
-// met de ABSOLUTE URI intact. Dit is het verschil met Go's standaard
-// http.Client die absolute URIs herschrijft.
+// writeProxyRequest writes an HTTP/1.1 request to the upstream connection
+// with the absolute URI intact.
 func (h *Handler) writeProxyRequest(w io.Writer, r *http.Request) error {
-	// Reconstrueer absolute URI. r.URL.String() behoudt scheme + host + path.
 	absURI := r.URL.String()
 
 	if _, err := fmt.Fprintf(w, "%s %s HTTP/1.1\r\n", r.Method, absURI); err != nil {
 		return err
 	}
 
-	// Verzamel headers. We zetten eerst user headers door, dan onze proxy
-	// headers bovenop (Proxy-Authorization, extras). Host wordt altijd gezet.
 	if err := writeHeader(w, "Host", r.Host); err != nil {
 		return err
 	}
@@ -210,7 +195,6 @@ func (h *Handler) writeProxyRequest(w io.Writer, r *http.Request) error {
 		}
 	}
 
-	// User headers behalve hop-by-hop en Host (die hebben we al gezet).
 	for k, vv := range r.Header {
 		if isHopByHop(k) || strings.EqualFold(k, "Host") || strings.EqualFold(k, "Proxy-Authorization") {
 			continue
@@ -222,12 +206,10 @@ func (h *Handler) writeProxyRequest(w io.Writer, r *http.Request) error {
 		}
 	}
 
-	// Headers einde
 	if _, err := w.Write([]byte("\r\n")); err != nil {
 		return err
 	}
 
-	// Body doorkopieren
 	if r.Body != nil && r.Body != http.NoBody {
 		n, err := io.Copy(w, r.Body)
 		if err != nil {
@@ -239,13 +221,12 @@ func (h *Handler) writeProxyRequest(w io.Writer, r *http.Request) error {
 }
 
 // -----------------------------------------------------------------------------
-// CONNECT tunnel voor HTTPS verkeer
+// CONNECT tunnel for HTTPS traffic
 // -----------------------------------------------------------------------------
 
 func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	// r.Host bevat "example.com:443" bij CONNECT
 	targetHost, targetPort := splitHostPort(r.Host, 443)
 
 	allow, _ := h.ACL.AllowHost(targetHost, targetPort)
@@ -254,7 +235,6 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hijack de client connection voor raw tunneling
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
@@ -267,7 +247,6 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	defer clientConn.Close()
 
-	// Connect naar upstream proxy
 	upstream, err := h.dialUpstream()
 	if err != nil {
 		upstreamDialErrors.Inc()
@@ -280,7 +259,6 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	activeConnections.Inc()
 	defer activeConnections.Dec()
 
-	// Stuur CONNECT naar upstream met auth headers
 	if _, err := fmt.Fprintf(upstream, "CONNECT %s HTTP/1.1\r\n", r.Host); err != nil {
 		h.Logger.Error("write CONNECT failed", "error", err)
 		return
@@ -302,7 +280,6 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Lees upstream response status
 	upstreamReader := bufio.NewReader(upstream)
 	resp, err := http.ReadResponse(upstreamReader, r)
 	if err != nil {
@@ -323,12 +300,11 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Succes: signaleer client en tunnel TCP bidirectioneel
 	if _, err := clientConn.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n")); err != nil {
 		return
 	}
 
-	// Flush any buffered data from client (maybe TLS ClientHello al verstuurd)
+	// Flush any buffered data from client (e.g. TLS ClientHello already sent).
 	if clientBuf != nil && clientBuf.Reader.Buffered() > 0 {
 		buffered, _ := clientBuf.Reader.Peek(clientBuf.Reader.Buffered())
 		if _, err := upstream.Write(buffered); err != nil {
@@ -337,7 +313,6 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		_, _ = clientBuf.Reader.Discard(clientBuf.Reader.Buffered())
 	}
 
-	// Bidirectionele kopie
 	bytesIn, bytesOut := tunnel(clientConn, upstream)
 	bytesTransferred.WithLabelValues("client_to_upstream").Add(float64(bytesOut))
 	bytesTransferred.WithLabelValues("upstream_to_client").Add(float64(bytesIn))
@@ -363,8 +338,8 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 // Helpers
 // -----------------------------------------------------------------------------
 
-// dialUpstream opent een verbinding naar de upstream proxy. Als mTLS is
-// enabled wrappen we met tls.Client gebruikmakend van de huidige cert config.
+// dialUpstream opens a connection to the upstream proxy. When mTLS is enabled
+// the connection is wrapped with tls.Client using the current certificate config.
 func (h *Handler) dialUpstream() (net.Conn, error) {
 	d := &net.Dialer{Timeout: h.DialTimeout}
 	raw, err := d.Dial("tcp", h.UpstreamProxy)
@@ -382,7 +357,6 @@ func (h *Handler) dialUpstream() (net.Conn, error) {
 	}
 
 	tlsCfg := h.CertManager.TLSConfig().Clone()
-	// Server name voor SNI + hostname validatie
 	host, _, _ := net.SplitHostPort(h.UpstreamProxy)
 	tlsCfg.ServerName = host
 	tlsCfg.InsecureSkipVerify = h.InsecureSkipVerify
@@ -429,8 +403,8 @@ func (h *Handler) denyConnect(w http.ResponseWriter, r *http.Request, host strin
 	http.Error(w, fmt.Sprintf("forbidden: %s", reason), http.StatusForbidden)
 }
 
-// tunnel kopieert data bidirectioneel tussen twee connections. Returnt
-// bytesIn (upstream->client) en bytesOut (client->upstream).
+// tunnel copies data bidirectionally between two connections.
+// Returns bytesIn (upstream→client) and bytesOut (client→upstream).
 func tunnel(client, upstream net.Conn) (bytesIn, bytesOut int64) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -439,7 +413,6 @@ func tunnel(client, upstream net.Conn) (bytesIn, bytesOut int64) {
 		defer wg.Done()
 		n, _ := io.Copy(upstream, client)
 		bytesOut = n
-		// Signaleer EOF naar upstream
 		if cw, ok := upstream.(closeWriter); ok {
 			_ = cw.CloseWrite()
 		}
@@ -462,15 +435,12 @@ type closeWriter interface {
 	CloseWrite() error
 }
 
-// writeHeader schrijft een HTTP header regel.
 func writeHeader(w io.Writer, name, value string) error {
 	_, err := fmt.Fprintf(w, "%s: %s\r\n", name, value)
 	return err
 }
 
-// isHopByHop returnt true als een header hop-by-hop is (niet end-to-end).
-// Deze moeten we NIET doorzetten naar upstream (behalve Proxy-Authorization
-// die we expliciet zelf toevoegen).
+// isHopByHop reports whether a header is hop-by-hop and must not be forwarded.
 func isHopByHop(name string) bool {
 	switch strings.ToLower(name) {
 	case "connection", "keep-alive", "proxy-authenticate",
@@ -499,20 +469,15 @@ func defaultPortForScheme(scheme string) uint32 {
 	return 80
 }
 
-// spiffeFromRequest probeert de SPIFFE URI te halen uit de client cert
-// zoals aangeleverd door ztunnel. In ambient mode initieert ztunnel de
-// HBONE mTLS verbinding en presenteert het pod's SPIFFE identiteit.
-// Als de forward proxy achter een TLS terminator draait vinden we de
-// identiteit in r.TLS.PeerCertificates[0].URIs.
+// spiffeFromRequest extracts the SPIFFE URI from the client certificate as
+// forwarded by ztunnel. In ambient mode ztunnel initiates the HBONE mTLS
+// connection and presents the pod's SPIFFE identity.
 //
-// Als de proxy direct plain HTTP van ztunnel ontvangt (plaintext na HBONE
-// decryptie door ztunnel), staat de SPIFFE identiteit typisch in een
-// header. Ztunnel zet deze niet standaard — je kunt dit aanzetten via
-// een pod label of via een custom authz filter. Voor nu returnen we leeg
-// als er geen TLS peer cert is.
+// When the proxy receives plain HTTP after HBONE decryption by ztunnel, the
+// identity may be forwarded in the X-Forwarded-Client-Cert header via a pod
+// label or custom authz filter.
 func spiffeFromRequest(r *http.Request) string {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-		// Fallback: check header (kan door een sidecar/ztunnel gezet zijn)
 		if v := r.Header.Get("X-Forwarded-Client-Cert"); v != "" {
 			return extractSPIFFEFromXFCC(v)
 		}
@@ -526,10 +491,8 @@ func spiffeFromRequest(r *http.Request) string {
 	return ""
 }
 
-// extractSPIFFEFromXFCC parseert de URI="spiffe://..." claim uit een
-// XFCC header. Envoy/ztunnel zet deze soms als een extra layer.
+// extractSPIFFEFromXFCC parses the URI="spiffe://..." claim from an XFCC header.
 func extractSPIFFEFromXFCC(v string) string {
-	// Simple parser: zoek URI="spiffe://..."
 	const key = "URI=\""
 	i := strings.Index(v, key)
 	if i < 0 {

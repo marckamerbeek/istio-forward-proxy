@@ -1,31 +1,31 @@
 # Operations Runbook
 
-## Day-2 operations voor istio-forward-proxy
+## Day-2 operations for istio-forward-proxy
 
-### Dagelijkse health check
+### Daily health check
 
 ```bash
 kubectl -n istio-egress get pods,hpa,pdb
 kubectl -n istio-egress top pods
 ```
 
-### Audit log query
+### Audit log queries
 
-Alle allow events van de laatste 15 minuten:
+Allow events from the last 15 minutes:
 
 ```bash
 kubectl -n istio-egress logs deployment/istio-forward-proxy --since=15m \
   | jq 'select(.decision == "allow") | {ts, spiffe, target_host, bytes_in, bytes_out}'
 ```
 
-Alle deny events:
+Deny events:
 
 ```bash
 kubectl -n istio-egress logs deployment/istio-forward-proxy --since=1h \
   | jq 'select(.decision == "deny") | {ts, spiffe, target_host, deny_reason}'
 ```
 
-Top 10 bestemmingen:
+Top 10 destinations:
 
 ```bash
 kubectl -n istio-egress logs deployment/istio-forward-proxy --since=1h \
@@ -41,7 +41,7 @@ Error rate:
 rate(forward_proxy_requests_total{decision="upstream_error"}[5m])
 ```
 
-Deny rate (mogelijk een misconfiguratie):
+Deny rate (possible misconfiguration):
 
 ```promql
 rate(forward_proxy_requests_total{decision="deny"}[5m])
@@ -61,11 +61,11 @@ forward_proxy_active_connections
 
 ## Incident response
 
-### Symptoom: alle requests krijgen 403
+### Symptom: all requests return 403
 
-**Oorzaak**: ServiceEntry cache is niet synced, of er zijn geen ServiceEntries.
+**Cause**: ServiceEntry cache is not synced, or no ServiceEntries exist.
 
-**Verificatie**:
+**Verify**:
 
 ```bash
 # Check allowlist
@@ -79,33 +79,32 @@ kubectl -n istio-egress exec deploy/istio-forward-proxy -- \
 
 **Fix**:
 
-- Als allowlist leeg is: check RBAC op ClusterRole/ClusterRoleBinding
-- Check dat ServiceEntries bestaan: `kubectl get serviceentries -A`
-- Restart proxy pods om een fresh list te forceren
+- Empty allowlist: check RBAC on ClusterRole/ClusterRoleBinding
+- Check ServiceEntries exist: `kubectl get serviceentries -A`
+- Restart proxy pods to force a fresh list
 
-### Symptoom: alle requests krijgen 502 Bad Gateway
+### Symptom: all requests return 502 Bad Gateway
 
-**Oorzaak**: upstream proxy onbereikbaar of TLS mismatch.
+**Cause**: upstream proxy unreachable or TLS mismatch.
 
-**Verificatie**:
+**Verify**:
 
 ```bash
 # Check upstream dial errors
 kubectl -n istio-egress exec deploy/istio-forward-proxy -- \
   wget -q -O - http://localhost:9090/metrics | grep upstream_dial
 
-# Check cert geldig
+# Check certificate validity
 kubectl -n istio-egress get certificate
 kubectl -n istio-egress describe certificate istio-forward-proxy-client
 
-# Test vanaf proxy pod (als shell beschikbaar; distroless heeft geen shell!)
-# Dus gebruik ephemeral debug container:
+# Test from proxy pod (distroless has no shell, use an ephemeral debug container):
 kubectl -n istio-egress debug -it deploy/istio-forward-proxy \
   --image=nicolaka/netshoot \
   --target=proxy \
   -- /bin/sh
-# In de container:
-#   openssl s_client -connect corporate-proxy.intern:8080 \
+# Inside the container:
+#   openssl s_client -connect corporate-proxy.corp:8080 \
 #     -cert /etc/proxy/certs/tls.crt \
 #     -key /etc/proxy/certs/tls.key \
 #     -CAfile /etc/proxy/certs/ca.crt
@@ -113,15 +112,15 @@ kubectl -n istio-egress debug -it deploy/istio-forward-proxy \
 
 **Fix**:
 
-- Cert verlopen: cert-manager check, `kubectl -n istio-egress annotate certificate istio-forward-proxy-client cert-manager.io/issue-temporary-certificate=true --overwrite`
-- Upstream hostname resolution faalt: check CoreDNS, check NetworkPolicy egressFromProxy
-- Upstream niet bereikbaar: firewall / NetworkPolicy
+- Expired cert: check cert-manager, `kubectl -n istio-egress annotate certificate istio-forward-proxy-client cert-manager.io/issue-temporary-certificate=true --overwrite`
+- Upstream hostname not resolving: check CoreDNS, check NetworkPolicy egressFromProxy
+- Upstream unreachable: check firewall / NetworkPolicy
 
-### Symptoom: intermittente 502s onder load
+### Symptom: intermittent 502s under load
 
-**Oorzaak**: HPA scaling event brak verbindingen, of connection leak.
+**Cause**: HPA scaling event broke connections, or connection leak.
 
-**Verificatie**:
+**Verify**:
 
 ```bash
 kubectl -n istio-egress describe hpa istio-forward-proxy
@@ -130,15 +129,15 @@ kubectl -n istio-egress get events --sort-by='.lastTimestamp' | tail -20
 
 **Fix**:
 
-- Verhoog `autoscaling.minReplicas` om buffer te hebben
-- Verhoog `podDisruptionBudget.minAvailable`
-- Check of applicaties retry-logic hebben; TCP verbindingen zijn stateful
+- Increase `autoscaling.minReplicas` to maintain a buffer
+- Increase `podDisruptionBudget.minAvailable`
+- Ensure applications have retry logic; TCP connections are stateful
 
-### Symptoom: cert niet geladen na rotatie
+### Symptom: certificate not reloaded after rotation
 
-**Oorzaak**: fsnotify event gemist, of file permission mismatch.
+**Cause**: fsnotify event missed, or file permission mismatch.
 
-**Verificatie**:
+**Verify**:
 
 ```bash
 kubectl -n istio-egress logs deployment/istio-forward-proxy \
@@ -149,7 +148,7 @@ kubectl -n istio-egress logs deployment/istio-forward-proxy \
 
 - Force reload: `kubectl -n istio-egress rollout restart deployment/istio-forward-proxy`
 - Check Secret permissions: `defaultMode: 0400` in Deployment volumes
-- Check dat Secret keys `tls.crt`, `tls.key`, `ca.crt` heten exact
+- Verify Secret keys are named exactly `tls.crt`, `tls.key`, `ca.crt`
 
 ## Upgrades
 
@@ -162,11 +161,11 @@ helm upgrade istio-forward-proxy ./deploy/helm/istio-forward-proxy \
   --set image.tag=0.2.0
 ```
 
-Rolling update behoudt minimaal `minAvailable` replicas.
+Rolling update keeps at least `minAvailable` replicas running.
 
-### Chart upgrade met schema changes
+### Chart upgrade with schema changes
 
-Check eerst de chart CHANGELOG, test in staging, dan:
+Check the chart CHANGELOG first, test in staging, then:
 
 ```bash
 helm diff upgrade istio-forward-proxy ./deploy/helm/istio-forward-proxy \
@@ -178,20 +177,19 @@ helm upgrade istio-forward-proxy ./deploy/helm/istio-forward-proxy \
 
 ### Istio ambient upgrade
 
-De proxy is een normale pod in ambient mesh. Na een Istio upgrade:
+The proxy is a regular pod in ambient mesh. After an Istio upgrade:
 
 1. `istioctl x precheck`
 2. Upgrade istiod + ztunnel via Helm
-3. Restart de forward proxy: `kubectl -n istio-egress rollout restart deployment/istio-forward-proxy`
+3. Restart the forward proxy: `kubectl -n istio-egress rollout restart deployment/istio-forward-proxy`
 4. Run e2e tests
 
 ## Capacity planning
 
-Een enkele pod (100m/128Mi request) haalt bij benadering:
+A single pod (100m/128Mi request) handles approximately:
 
-- 500 req/s voor korte HTTP requests
-- 50 MB/s throughput voor CONNECT tunnels
+- 500 req/s for short HTTP requests
+- 50 MB/s throughput for CONNECT tunnels
 - ~1000 concurrent open connections
 
-Scale gaat mee met CPU: bij 70% CPU usage triggert HPA scale-up. Voor 10k
-concurrent tunnels plan je op ~20 replicas.
+HPA scales at 70% CPU utilization. For 10k concurrent tunnels plan for ~20 replicas.

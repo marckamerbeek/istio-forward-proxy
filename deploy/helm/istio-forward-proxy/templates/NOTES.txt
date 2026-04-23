@@ -1,27 +1,27 @@
 {{- $port := (split ":" .Values.proxy.listenAddr)._1 }}
 ============================================================
- istio-forward-proxy succesvol geïnstalleerd
+ istio-forward-proxy installed successfully
 ============================================================
 
 Release:   {{ .Release.Name }}
 Namespace: {{ .Release.Namespace }}
 Chart:     {{ include "forward-proxy.chart" . }}
 
-De proxy is bereikbaar binnen het cluster op:
+The proxy is available within the cluster at:
 
     http://{{ include "forward-proxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ $port }}
 
 ============================================================
- Voor gebruikers: HTTP_PROXY configureren
+ Configure HTTP_PROXY in your pods
 ============================================================
 
-Deploy pods in een namespace met istio.io/dataplane-mode=ambient label,
-en zet de HTTP_PROXY env var:
+Deploy pods in a namespace with the istio.io/dataplane-mode=ambient label
+and set the HTTP_PROXY environment variable:
 
     apiVersion: v1
     kind: Pod
     metadata:
-      name: mijn-app
+      name: my-app
       namespace: team-a
     spec:
       containers:
@@ -34,11 +34,10 @@ en zet de HTTP_PROXY env var:
               value: "http://{{ include "forward-proxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ $port }}"
 
 ============================================================
- Registreer externe hosts
+ Register external hosts
 ============================================================
 
-Creeer een ServiceEntry (in welke namespace dan ook) om verkeer naar
-een externe host toe te staan:
+Create a ServiceEntry (in any namespace) to allow traffic to an external host:
 
     apiVersion: networking.istio.io/v1
     kind: ServiceEntry
@@ -58,7 +57,7 @@ een externe host toe te staan:
       resolution: DNS
 
 ============================================================
- Verifieer de installatie
+ Verify the installation
 ============================================================
 
     kubectl -n {{ .Release.Namespace }} get pods

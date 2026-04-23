@@ -39,11 +39,11 @@ spec:
             {{- end }}
       to:
         - operation:
-            # Alleen de proxy poort accepteren
+            # Only accept the proxy port
             ports:
               - "{{ (split ":" .Values.proxy.listenAddr)._1 }}"
     {{- end }}
-    # Healthcheck probes altijd toestaan (kubelet → metrics port)
+    # Always allow kubelet health probes (kubelet → metrics port)
     - to:
         - operation:
             ports:

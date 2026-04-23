@@ -1,11 +1,11 @@
-// Package serviceentry implementeert een Kubernetes API watcher op
-// networking.istio.io/v1 ServiceEntries. Elke ServiceEntry in het cluster
-// bepaalt welke externe hosts door de forward proxy heen mogen. Dit is
-// het equivalent van REGISTRY_ONLY outboundTrafficPolicy combinatie met
-// ServiceEntry in Istio.
+// Package serviceentry implements a Kubernetes API watcher for
+// networking.istio.io/v1 ServiceEntries. Each ServiceEntry in the cluster
+// defines which external hosts the forward proxy allows. This is the
+// equivalent of Istio's REGISTRY_ONLY outboundTrafficPolicy combined with
+// ServiceEntry resources.
 //
-// De watcher gebruikt de Istio client-go library en maakt een in-memory
-// allowlist die via AllowHost() wordt bevraagd door de proxy handler.
+// The watcher uses the Istio client-go library to maintain an in-memory
+// allowlist that the proxy handler queries via AllowHost().
 package serviceentry
 
 import (
@@ -25,16 +25,16 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// Watcher houdt de actuele allowlist bij. Methods zijn safe voor concurrent
-// use via RWMutex en atomic synced flag.
+// Watcher maintains the current allowlist. All methods are safe for concurrent
+// use via RWMutex and an atomic synced flag.
 type Watcher struct {
-	client     istioclient.Interface
-	factory    istioinformers.SharedInformerFactory
-	logger     *slog.Logger
+	client  istioclient.Interface
+	factory istioinformers.SharedInformerFactory
+	logger  *slog.Logger
 
 	mu        sync.RWMutex
-	hosts     map[string]hostEntry // key: exacte hostname, value: metadata
-	wildcards []wildcardEntry      // wildcards zoals *.example.com
+	hosts     map[string]hostEntry // key: exact hostname
+	wildcards []wildcardEntry      // e.g. *.example.com
 
 	synced atomic.Bool
 }
@@ -47,12 +47,12 @@ type hostEntry struct {
 }
 
 type wildcardEntry struct {
-	Suffix string    // .example.com (incl. leading dot)
+	Suffix string    // .example.com (including leading dot)
 	Entry  hostEntry `json:"entry"`
 }
 
-// NewWatcher maakt een watcher die gebruik maakt van de in-cluster config
-// als het in een pod draait, of kubeconfig als KUBECONFIG env var is gezet.
+// NewWatcher creates a watcher using in-cluster config when running inside a
+// pod, or kubeconfig when the KUBECONFIG env var is set.
 func NewWatcher(logger *slog.Logger) (*Watcher, error) {
 	cfg, err := loadKubeConfig()
 	if err != nil {
@@ -77,16 +77,14 @@ func NewWatcher(logger *slog.Logger) (*Watcher, error) {
 }
 
 func loadKubeConfig() (*rest.Config, error) {
-	// Probeer eerst in-cluster config
 	if cfg, err := rest.InClusterConfig(); err == nil {
 		return cfg, nil
 	}
-	// Val terug op kubeconfig file
 	loader := clientcmd.NewDefaultClientConfigLoadingRules()
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loader, &clientcmd.ConfigOverrides{}).ClientConfig()
 }
 
-// Run start de informer en blokkeert tot ctx klaar is.
+// Run starts the informer and blocks until ctx is done.
 func (w *Watcher) Run(ctx context.Context) {
 	informer := w.factory.Networking().V1().ServiceEntries().Informer()
 
@@ -106,26 +104,26 @@ func (w *Watcher) Run(ctx context.Context) {
 	<-ctx.Done()
 }
 
-// Synced returnt true zodra de initial list klaar is.
+// Synced returns true once the initial list from the API server is complete.
 func (w *Watcher) Synced() bool {
 	return w.synced.Load()
 }
 
-// Count returnt het aantal unieke hosts.
+// Count returns the number of unique allowed hosts.
 func (w *Watcher) Count() int {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return len(w.hosts) + len(w.wildcards)
 }
 
-// AllowHost bepaalt of een host:port combinatie door de proxy mag.
-// Geeft ook een hostEntry terug voor logging/debug doeleinden.
+// AllowHost reports whether a host:port combination is allowed by the proxy.
+// Also returns the matching hostEntry for logging/debug purposes.
 //
-// Matching regels:
-//  1. Exacte match op host — toegestaan als poort ook matcht (of geen
-//     poorten gespecificeerd in ServiceEntry, dan alle poorten toe)
-//  2. Wildcard match op *.example.com — toegestaan als host eindigt op
-//     .example.com en poort matcht
+// Matching rules:
+//  1. Exact match on host — allowed if the port also matches (or no ports
+//     are specified in the ServiceEntry, meaning all ports are allowed).
+//  2. Wildcard match on *.example.com — allowed if the host ends with
+//     .example.com and the port matches.
 func (w *Watcher) AllowHost(host string, port uint32) (bool, hostEntry) {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 
@@ -153,7 +151,7 @@ func (w *Watcher) AllowHost(host string, port uint32) (bool, hostEntry) {
 
 func portAllowed(e hostEntry, port uint32) bool {
 	if len(e.AllowedPorts) == 0 {
-		return true // geen port restrictie = alle poorten
+		return true // no port restriction means all ports are allowed
 	}
 	for _, p := range e.AllowedPorts {
 		if p == port {
@@ -163,7 +161,7 @@ func portAllowed(e hostEntry, port uint32) bool {
 	return false
 }
 
-// DumpJSON schrijft de huidige allowlist als JSON (voor debug endpoint).
+// DumpJSON writes the current allowlist as JSON for the debug endpoint.
 func (w *Watcher) DumpJSON(out io.Writer) {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -182,9 +180,9 @@ func (w *Watcher) DumpJSON(out io.Writer) {
 	_ = enc.Encode(payload)
 }
 
-// rebuild wordt bij elke event aangeroepen om de allowlist te herberekenen
-// vanuit de informer cache. Dit is simpeler en robuuster dan incrementele
-// updates want ServiceEntry wijzigingen zijn zeldzaam.
+// rebuild recomputes the allowlist from the informer cache on every event.
+// A full rebuild is simpler and more robust than incremental updates because
+// ServiceEntry changes are infrequent.
 func (w *Watcher) rebuild() {
 	lister := w.factory.Networking().V1().ServiceEntries().Lister()
 	entries, err := lister.List(labelsEverything())
@@ -208,7 +206,7 @@ func (w *Watcher) rebuild() {
 				Namespace:    se.Namespace,
 				Name:         se.Name,
 				Ports:        ports,
-				AllowedPorts: ports, // huidig: alle poorten uit ServiceEntry toestaan
+				AllowedPorts: ports,
 			}
 
 			if strings.HasPrefix(h, "*.") {
