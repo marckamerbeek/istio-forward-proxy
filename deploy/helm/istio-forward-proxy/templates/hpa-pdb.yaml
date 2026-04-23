@@ -31,7 +31,7 @@ spec:
     {{- end }}
   behavior:
     scaleDown:
-      # Rustige scale-down om open tunnels niet te bruusk af te breken
+      # Slow scale-down to avoid abruptly terminating open tunnels
       stabilizationWindowSeconds: 300
       policies:
         - type: Pods

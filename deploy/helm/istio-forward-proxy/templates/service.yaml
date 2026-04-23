@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "forward-proxy.labels" . | nindent 4 }}
   annotations:
-    # Egress proxy is intern, geen LoadBalancer
+    # Egress proxy is cluster-internal only
     networking.istio.io/service-type: ClusterIP
 spec:
   type: {{ .Values.service.type }}

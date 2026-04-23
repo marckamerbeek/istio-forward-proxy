@@ -46,8 +46,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
-Bepaal de naam van de client-cert Secret. Als cert-manager is ingeschakeld
-genereren we die zelf; anders verwachten we een bestaande Secret.
+Resolve the client-cert Secret name. When cert-manager is enabled the
+chart generates the Secret; otherwise an existing Secret is expected.
 */}}
 {{- define "forward-proxy.certSecret" -}}
 {{- if .Values.proxy.mtls.certManager.enabled -}}

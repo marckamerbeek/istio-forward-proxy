@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1.7
 # --------------------------------------------------------------------
-# Build stage: compileer de Go binary statisch zodat we distroless static
-# image kunnen gebruiken (geen libc nodig).
+# Build stage: compile a static Go binary for use with distroless.
 # --------------------------------------------------------------------
 FROM golang:1.22-alpine AS builder
 
@@ -11,15 +10,15 @@ ARG BUILD_DATE
 
 WORKDIR /src
 
-# Dependencies cachen
+# Cache dependencies
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Source kopieren
+# Copy source
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 
-# Statische binary bouwen met versie info
+# Build static binary with version info
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
     -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" \

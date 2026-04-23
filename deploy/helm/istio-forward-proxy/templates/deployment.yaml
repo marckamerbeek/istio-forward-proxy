@@ -16,14 +16,14 @@ spec:
       labels:
         {{- include "forward-proxy.selectorLabels" . | nindent 8 }}
         {{- if .Values.istio.ambient.enabled }}
-        # Zorgt dat ztunnel deze pod als ambient deelnemer behandelt
+        # Opts this pod into Istio ambient mode (processed by ztunnel)
         istio.io/dataplane-mode: ambient
         {{- end }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
-        # Force pod restart als cert Secret wijzigt
+        # Force pod restart when cert Secret changes
         checksum/cert-secret: {{ include "forward-proxy.certSecret" . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}

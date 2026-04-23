@@ -14,7 +14,7 @@ coverage.out
 # Helm
 *.tgz
 
-# Local secrets (NOOIT committen!)
+# Local secrets (never commit!)
 *.key
 *.crt
 *.pem
