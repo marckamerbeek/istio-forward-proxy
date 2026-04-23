@@ -1,4 +1,4 @@
-# istio-forward-proxy
+# istio-forward-proxy (Still under construction)
 
 A forward proxy for **Istio ambient mode** that preserves absolute paths in
 HTTP request-lines when forwarding to an upstream proxy chain.
