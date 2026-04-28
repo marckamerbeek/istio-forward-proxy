@@ -55,6 +55,12 @@ func (m *Manager) reload() error {
 	if err != nil {
 		return fmt.Errorf("load keypair: %w", err)
 	}
+	// tls.LoadX509KeyPair does not populate Leaf; parse it explicitly so the
+	// logging below and any TLS handshake inspection can access cert metadata.
+	cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("parse leaf certificate: %w", err)
+	}
 
 	caPEM, err := os.ReadFile(caPath)
 	if err != nil {
