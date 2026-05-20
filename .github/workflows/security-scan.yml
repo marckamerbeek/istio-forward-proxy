@@ -3,6 +3,7 @@ name: Build, Scan and Push to DockerHub
 on:
   push:
     branches: [ "master" ]
+    tags: [ "v*.*.*" ] # Triggers the workflow when a version tag is pushed (e.g., v1.0.0)
   pull_request:
     branches: [ "master" ]
 
@@ -26,15 +27,32 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    # 3. Build the image locally in the runner so we can scan it first
+    # 3. HYBRIDE METADATA: Generates both SHA and SemVer versions
+    - name: Extract Docker metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ secrets.DOCKERHUB_USERNAME }}/istio-forward-proxy
+        tags: |
+          # 1. Generate a short Git SHA tag for every build
+          type=sha,format=short,prefix=sha-
+          
+          # 2. If a Git tag is pushed (v1.2.3), translate it to docker tag '1.2.3'
+          type=semver,pattern={{version}}
+          
+          # 3. Update 'latest' ONLY on master branch pushes or when a new release tag is pushed
+          type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') }}
+
+    # 4. Build the image locally in the runner so we can scan it first
     - name: Build Docker Image locally
       uses: docker/build-push-action@v5
       with:
         context: .
         load: true # Loads the image locally into the runner for the scan step
-        tags: ${{ secrets.DOCKERHUB_USERNAME }}/istio-forward-proxy:latest
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ secrets.DOCKERHUB_USERNAME }}/istio-forward-proxy:latest
 
-    # 4. THE SECURITY GATE: Scan the local Docker image with Trivy before pushing
+    # 5. THE SECURITY GATE: Scan the local Docker image with Trivy before pushing
     - name: Scan Docker Image (Security Gate)
       uses: aquasecurity/trivy-action@master
       with:
@@ -43,13 +61,12 @@ jobs:
         exit-code: '1' # CRITICAL: Fails the build immediately if high/critical vulnerabilities are found!
         severity: 'CRITICAL,HIGH'
 
-    # 5. Only push the image to DockerHub if all previous steps (including the scan) passed
+    # 6. Only push the image to DockerHub if all previous steps (including the scan) passed
     - name: Push Image to Docker Hub
       if: success() # Only runs if the security scan returns a green/successful status
       uses: docker/build-push-action@v5
       with:
         context: .
         push: true
-        tags: |
-          ${{ secrets.DOCKERHUB_USERNAME }}/istio-forward-proxy:latest
-          ${{ secrets.DOCKERHUB_USERNAME }}/istio-forward-proxy:${{ github.sha }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
