@@ -32,13 +32,13 @@ jobs:
       with:
         context: .
         load: true # Loads the image locally into the runner for the scan step
-        tags: ${{ secrets.DOCKERHUB_USERNAME }}/mijn-applicatie:latest
+        tags: ${{ secrets.DOCKERHUB_USERNAME }}/istio-forward-proxy:latest
 
     # 4. THE SECURITY GATE: Scan the local Docker image with Trivy before pushing
     - name: Scan Docker Image (Security Gate)
       uses: aquasecurity/trivy-action@master
       with:
-        image-ref: '${{ secrets.DOCKERHUB_USERNAME }}/mijn-applicatie:latest'
+        image-ref: '${{ secrets.DOCKERHUB_USERNAME }}/istio-forward-proxy:latest'
         format: 'table'
         exit-code: '1' # CRITICAL: Fails the build immediately if high/critical vulnerabilities are found!
         severity: 'CRITICAL,HIGH'
@@ -51,5 +51,5 @@ jobs:
         context: .
         push: true
         tags: |
-          ${{ secrets.DOCKERHUB_USERNAME }}/mijn-applicatie:latest
-          ${{ secrets.DOCKERHUB_USERNAME }}/mijn-applicatie:${{ github.sha }}
+          ${{ secrets.DOCKERHUB_USERNAME }}/istio-forward-proxy:latest
+          ${{ secrets.DOCKERHUB_USERNAME }}/istio-forward-proxy:${{ github.sha }}
