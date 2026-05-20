@@ -2,7 +2,7 @@
 # --------------------------------------------------------------------
 # Build stage: compile a static Go binary for use with distroless.
 # --------------------------------------------------------------------
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 ARG VERSION=dev
 ARG COMMIT=unknown
