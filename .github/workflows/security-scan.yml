@@ -16,8 +16,10 @@ jobs:
     - name: Check out repository code
       uses: actions/checkout@v4
 
-    # 1. Log in to DockerHub using secure repository secrets
+    # 1. Log in to DockerHub using secure repository secrets (only needed when we're actually pushing;
+    #    PR checks - e.g. from Dependabot - don't have access to these secrets, so skip login there)
     - name: Log in to Docker Hub
+      if: github.event_name == 'push'
       uses: docker/login-action@v3
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -27,43 +29,44 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    # 3. HYBRIDE METADATA: Generates both SHA and SemVer versions
+    # 3. HYBRIDE METADATA: Generates both SHA and SemVer versions (only needed when pushing)
     - name: Extract Docker metadata
       id: meta
+      if: github.event_name == 'push'
       uses: docker/metadata-action@v5
       with:
         images: ${{ secrets.DOCKERHUB_USERNAME }}/istio-forward-proxy
         tags: |
           # 1. Generate a short Git SHA tag for every build
           type=sha,format=short,prefix=sha-
-          
+
           # 2. If a Git tag is pushed (v1.2.3), translate it to docker tag '1.2.3'
           type=semver,pattern={{version}}
-          
+
           # 3. Update 'latest' ONLY on master branch pushes or when a new release tag is pushed
           type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') }}
 
-    # 4. Build the image locally in the runner so we can scan it first
+    # 4. Build the image locally in the runner so we can scan it first.
+    #    Uses a fixed local tag so this works without Docker Hub credentials (e.g. on PR checks).
     - name: Build Docker Image locally
       uses: docker/build-push-action@v5
       with:
         context: .
         load: true # Loads the image locally into the runner for the scan step
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ secrets.DOCKERHUB_USERNAME }}/istio-forward-proxy:latest
+        tags: istio-forward-proxy:ci-scan
 
     # 5. THE SECURITY GATE: Scan the local Docker image with Trivy before pushing
     - name: Scan Docker Image (Security Gate)
       uses: aquasecurity/trivy-action@master
       with:
-        image-ref: '${{ secrets.DOCKERHUB_USERNAME }}/istio-forward-proxy:latest'
+        image-ref: 'istio-forward-proxy:ci-scan'
         format: 'table'
         exit-code: '1' # CRITICAL: Fails the build immediately if high/critical vulnerabilities are found!
         severity: 'CRITICAL,HIGH'
 
-    # 6. Only push the image to DockerHub if all previous steps (including the scan) passed
+    # 6. Only push the image to DockerHub on push events (branch/tag), once the scan has passed
     - name: Push Image to Docker Hub
-      if: success() # Only runs if the security scan returns a green/successful status
+      if: github.event_name == 'push' && success() # Only runs on pushes, and if the security scan was green
       uses: docker/build-push-action@v5
       with:
         context: .
