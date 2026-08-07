@@ -1,4 +1,4 @@
-# istio-forward-proxy (Still under construction)
+# istio-forward-proxy
 
 A forward proxy for **Istio ambient mode** that preserves absolute paths in
 HTTP request-lines when forwarding to an upstream proxy chain.
@@ -11,6 +11,98 @@ that require absolute-form requests:
 Envoy:                GET /politics HTTP/1.1                        ← origin-server form
 istio-forward-proxy:  GET http://edition.cnn.com/politics HTTP/1.1  ← proxy form (RFC 7230 §5.3.2)
 ```
+
+## Why this proxy? Egress control in an Istio ambient mesh
+
+Istio ambient mode does a good job securing traffic inside the mesh. Once a
+namespace gets the `istio.io/dataplane-mode=ambient` label, `ztunnel`
+intercepts traffic to and from every pod, encrypts it with mTLS, and
+attaches a verifiable identity to it (a SPIFFE ID such as
+`spiffe://cluster.local/ns/team-a/sa/app-x`). No team has to configure
+anything for this; it's part of what the mesh gives you.
+
+That protection stops at the edge of the cluster. By default, any pod can
+connect to any external host on any port, with no registration or control
+at all. There is no built-in limit on outbound traffic, so a leaked
+credential, a compromised library, or a malicious script inside a container
+can send data out unnoticed. Nothing records which pod talked to which
+external host.
+
+Istio's `ServiceEntry` object is meant to close that gap. You register
+which external hosts a pod may reach, and traffic to anything else can be
+denied with `outboundTrafficPolicy: REGISTRY_ONLY`. In practice this
+setting is rarely turned on, for two reasons. Most organizations already
+run a central forward proxy such as Squid for outbound traffic, with its
+own authentication and filtering, and don't want to bypass it. And Envoy's
+own TLS origination (`ServiceEntry` + `DestinationRule`) rewrites the
+absolute request path into a relative one, as shown above, while Squid and
+similar proxies require the absolute path. Once an upstream proxy chain is
+involved, Istio's native approach breaks the traffic, so teams end up
+turning egress enforcement off again.
+
+istio-forward-proxy solves both problems at once. It runs as an ordinary
+pod in the mesh, so ztunnel secures it the same way as any other workload,
+and it becomes the mandatory path for all outbound traffic. In the
+background it watches the Kubernetes API for `ServiceEntry` objects
+anywhere in the cluster and keeps an in-memory allowlist up to date.
+
+If a requested host isn't covered by any `ServiceEntry`, the request is
+denied with `403 Forbidden` and the attempt is logged, including the
+SPIFFE identity of the pod that made it. If the host is covered, the
+request goes through with the absolute path intact, over mTLS, to the
+existing upstream proxy chain.
+
+That makes "no ServiceEntry, no access" a rule that is actually enforced
+and auditable for all outbound traffic, the same zero-trust approach Istio
+already applies between pods, extended to the edge of the cluster. Every
+exception is explicit, owned by a team, and lives as a pull request in Git
+instead of a ticket or a firewall rule nobody can find later.
+
+### How it works
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Pod as Pod (team-a)
+    participant zt as ztunnel
+    participant fp as istio-forward-proxy
+    participant k8s as Kubernetes API<br/>(ServiceEntry watcher)
+    participant up as Upstream proxy<br/>(e.g. Squid)
+    participant ext as External destination
+
+    rect rgb(230, 240, 255)
+    Note over k8s,fp: Continuously, in the background
+    k8s-->>fp: watch ServiceEntries<br/>(location: MESH_EXTERNAL)
+    fp->>fp: build in-memory allowlist<br/>host → allowed ports
+    end
+
+    Pod->>zt: GET http://api.example.com/<br/>(via HTTP_PROXY)
+    zt->>fp: HBONE mTLS + pod's<br/>SPIFFE identity
+    fp->>fp: is host in the allowlist?
+
+    alt Host is covered by a ServiceEntry → allowed
+        fp->>up: mTLS, absolute path preserved<br/>GET http://api.example.com/ HTTP/1.1
+        up->>ext: forward to the internet
+        ext-->>up: response
+        up-->>fp: response
+        fp-->>zt: response
+        zt-->>Pod: 200 OK
+        fp->>fp: audit log:<br/>decision=allow, spiffe, host
+    else No ServiceEntry covers this host → blocked
+        fp-->>zt: 403 Forbidden
+        zt-->>Pod: 403 Forbidden
+        fp->>fp: audit log:<br/>decision=deny, reason=host_not_in_allowlist, spiffe
+    end
+```
+
+In short:
+
+| Without istio-forward-proxy | With istio-forward-proxy |
+|---|---|
+| Any pod can reach any external address | Only hosts covered by a `ServiceEntry` are reachable |
+| No visibility into outbound traffic | Every allowed and denied request is logged with pod identity |
+| Egress access via tickets/firewall rules | Egress access via a pull request on a `ServiceEntry` |
+| TLS origination breaks existing Squid proxies | Absolute path is preserved, existing proxy infrastructure keeps working |
 
 ## Architecture
 
