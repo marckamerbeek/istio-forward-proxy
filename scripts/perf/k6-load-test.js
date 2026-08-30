@@ -28,6 +28,9 @@ export const options = {
     http_req_failed: ['rate<0.01'],
     http_req_duration: ['p(95)<200', 'p(99)<500'],
   },
+  // p(99) isn't in k6's default summary trend stats, but the workflow's
+  // job-summary step reads it out of the JSON export, so request it explicitly.
+  summaryTrendStats: ['avg', 'min', 'med', 'p(90)', 'p(95)', 'p(99)', 'max'],
 };
 
 export default function () {
