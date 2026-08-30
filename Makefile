@@ -1,6 +1,6 @@
 # istio-forward-proxy Makefile
 
-.PHONY: help build test lint docker docker-push install uninstall e2e clean
+.PHONY: help build test lint docker docker-push install uninstall e2e perf-test clean
 
 IMAGE_REPO ?= localhost/istio-forward-proxy
 IMAGE_TAG  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
@@ -45,6 +45,9 @@ uninstall: ## Remove from cluster
 
 e2e: ## Run end-to-end tests on cluster
 	./scripts/e2e-test.sh
+
+perf-test: ## Run k6 performance test (requires a kube context with the ServiceEntry CRD; see scripts/perf-test.sh)
+	./scripts/perf-test.sh
 
 verify-absolute-path: ## Prove that absolute paths are preserved
 	./scripts/verify-absolute-path.sh

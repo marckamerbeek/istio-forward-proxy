@@ -650,6 +650,26 @@ registration, metrics endpoint, and structured audit events.
 Deploys a mock upstream that logs raw request-lines, sends traffic through
 the proxy, and fails if a relative path is received.
 
+### Performance test
+
+```bash
+make perf-test   # or: ./scripts/perf-test.sh
+```
+
+Runs a [k6](https://k6.io) load test against the HTTP forward path: a mock
+upstream (`traefik/whoami`) stands in for the real Squid/HTTP upstream, and
+k6 drives traffic through the proxy via `HTTP_PROXY`, which — being Go-based
+— naturally sends requests in the absolute-form the proxy expects. Needs a
+kube context with the Istio `ServiceEntry` CRD registered (any cluster with
+Istio installed, or just the CRDs — see `.github/workflows/perf-test.yml`
+for how CI provisions one with `kind` + the `istio/base` Helm chart).
+
+Thresholds (`http_req_failed` rate and `http_req_duration` p95/p99, defined
+in `scripts/perf/k6-load-test.js`) fail the run — and the
+[Performance Test](https://github.com/marckamerbeek/istio-forward-proxy/actions/workflows/perf-test.yml)
+GitHub Action — on regression. It runs on every push/PR to `master` that
+touches proxy code, and can be triggered manually via `workflow_dispatch`.
+
 ## Operations
 
 See [docs/OPERATIONS.md](docs/OPERATIONS.md) for the full operations runbook.

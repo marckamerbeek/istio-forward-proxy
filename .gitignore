@@ -4,6 +4,7 @@ dist/
 *.test
 *.out
 coverage.out
+k6-summary.json
 
 # Editor
 .vscode/
