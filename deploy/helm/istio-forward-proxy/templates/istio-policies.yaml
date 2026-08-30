@@ -43,7 +43,9 @@ spec:
             ports:
               - "{{ (split ":" .Values.proxy.listenAddr)._1 }}"
     {{- end }}
-    # Always allow kubelet health probes (kubelet → metrics port)
+    # Always allow kubelet health probes (kubelet → metrics port). This has no
+    # `from:`, so any principal may reach the port — /debug/allowlist is
+    # restricted to loopback callers in-app instead (see networkpolicy.yaml).
     - to:
         - operation:
             ports:

@@ -14,6 +14,7 @@ import (
 	"context"
 	"flag"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -142,10 +143,33 @@ func metricsMux(seWatcher *serviceentry.Watcher) http.Handler {
 		_, _ = w.Write([]byte("ready"))
 	})
 	mux.HandleFunc("/debug/allowlist", func(w http.ResponseWriter, r *http.Request) {
+		// The metrics port has no NetworkPolicy/AuthorizationPolicy source
+		// restriction (kubelet health probes have no identity to scope to),
+		// so any pod in the cluster can otherwise reach this port. Unlike
+		// /metrics and /healthz|/readyz, this endpoint dumps every team's
+		// ServiceEntry-derived ACL entries, so it's restricted to loopback —
+		// the only way it's ever used per the docs (`kubectl exec` and
+		// `kubectl port-forward` both connect via the pod's loopback
+		// interface, so neither is affected by this check).
+		if !isLoopback(r.RemoteAddr) {
+			http.Error(w, "forbidden: /debug/allowlist is only accessible via kubectl exec or kubectl port-forward", http.StatusForbidden)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		seWatcher.DumpJSON(w)
 	})
 	return mux
+}
+
+// isLoopback reports whether remoteAddr (an http.Request.RemoteAddr, in
+// "host:port" form) originates from the loopback interface.
+func isLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 type config struct {

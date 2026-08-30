@@ -79,7 +79,13 @@ spec:
       ports:
         - protocol: TCP
           port: {{ (split ":" .Values.proxy.listenAddr)._1 | int }}
-    # Kubelet health probes
+    # Kubelet health probes. Kubelet has no pod/namespace identity to scope a
+    # `from:` selector to, so this port is reachable from any pod in the
+    # cluster — same as with any Service exposing /metrics for Prometheus.
+    # /debug/allowlist (which dumps every team's ServiceEntry-derived ACL,
+    # unlike /metrics or /healthz|/readyz) is restricted to loopback callers
+    # in-app (cmd/main.go's isLoopback check) specifically because this port
+    # can't be scoped at the network layer.
     - ports:
         - protocol: TCP
           port: {{ (split ":" .Values.proxy.metricsAddr)._1 | int }}
