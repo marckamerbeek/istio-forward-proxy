@@ -2,7 +2,7 @@
 # --------------------------------------------------------------------
 # Build stage: compile a static Go binary for use with distroless.
 # --------------------------------------------------------------------
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 ARG VERSION=dev
 ARG COMMIT=unknown
@@ -27,7 +27,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # --------------------------------------------------------------------
 # Runtime stage: distroless static, non-root user (blijft hetzelfde)
 # --------------------------------------------------------------------
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 
 COPY --from=builder /out/forward-proxy /usr/local/bin/forward-proxy
 
