@@ -79,11 +79,11 @@ jobs:
             echo "## k6 performance summary"
             echo '```json'
             jq '{
-              requests: .metrics.http_reqs.values.count,
-              failed_rate: .metrics.http_req_failed.values.rate,
-              duration_avg_ms: .metrics.http_req_duration.values.avg,
-              duration_p95_ms: .metrics.http_req_duration.values["p(95)"],
-              duration_p99_ms: .metrics.http_req_duration.values["p(99)"]
+              requests: .metrics.http_reqs.count,
+              failed_rate: .metrics.http_req_failed.value,
+              duration_avg_ms: .metrics.http_req_duration.avg,
+              duration_p95_ms: .metrics.http_req_duration["p(95)"],
+              duration_p99_ms: .metrics.http_req_duration["p(99)"]
             }' k6-summary.json
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
