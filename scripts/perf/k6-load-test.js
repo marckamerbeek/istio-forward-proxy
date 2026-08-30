@@ -9,12 +9,19 @@ import { check } from 'k6';
 
 const TARGET_URL = __ENV.TARGET_URL || 'http://perf-test.internal/';
 
+// A fixed arrival rate (rather than free-running VUs) keeps the offered load
+// deterministic regardless of runner speed or proxy latency, and keeps it
+// within what the single-instance mock upstream can sustain — the goal here
+// is measuring the proxy's per-request overhead, not the mock's capacity.
 export const options = {
   scenarios: {
     steady_load: {
-      executor: 'constant-vus',
-      vus: Number(__ENV.VUS || 20),
+      executor: 'constant-arrival-rate',
+      rate: Number(__ENV.RATE || 150),
+      timeUnit: '1s',
       duration: __ENV.DURATION || '30s',
+      preAllocatedVUs: Number(__ENV.VUS || 20),
+      maxVUs: Number(__ENV.MAX_VUS || 50),
     },
   },
   thresholds: {

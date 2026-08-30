@@ -127,11 +127,12 @@ pass "$TEST_HOST present in allowlist"
 # -----------------------------------------------------------------------------
 step "4. Run k6 load test through the proxy"
 # -----------------------------------------------------------------------------
-log "VUS=${VUS:-20} DURATION=${DURATION:-30s} target=http://$TEST_HOST/"
+log "RATE=${RATE:-150}/s VUS=${VUS:-20} DURATION=${DURATION:-30s} target=http://$TEST_HOST/"
 
 set +e
 HTTP_PROXY="http://127.0.0.1:$PROXY_PORT" \
 TARGET_URL="http://$TEST_HOST/" \
+RATE="${RATE:-150}" \
 VUS="${VUS:-20}" \
 DURATION="${DURATION:-30s}" \
   k6 run --summary-export="$SUMMARY_EXPORT" scripts/perf/k6-load-test.js
