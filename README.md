@@ -159,7 +159,10 @@ external destination
 │   ├── e2e-test.sh                  End-to-end cluster tests
 │   ├── verify-absolute-path.sh      Proof that paths stay absolute
 │   └── local-test.sh                Local smoke test without a cluster
-└── docs/                            Additional documentation
+└── docs/
+    ├── ARCHITECTURE.md               Request flow, threading model, design decisions
+    ├── OPERATIONS.md                 Day-2 runbook: audit queries, incident response
+    └── EGRESS-ENFORCEMENT.md         Making the proxy the *only* path out, cluster-wide
 ```
 
 ## Prerequisites
@@ -572,6 +575,13 @@ audit trail.
 # Enroll a namespace in ambient mode:
 kubectl label namespace team-a istio.io/dataplane-mode=ambient
 ```
+
+Setting `HTTP_PROXY` only makes the proxy the *default* path — nothing stops
+a workload from ignoring it and connecting out directly. See
+[docs/EGRESS-ENFORCEMENT.md](docs/EGRESS-ENFORCEMENT.md) for how to make it
+the *only* path, with `NetworkPolicy` (and optionally policy-as-code) so
+direct egress is actually blocked at the network layer, not just discouraged
+by convention.
 
 ---
 
