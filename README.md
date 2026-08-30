@@ -703,6 +703,12 @@ Prometheus metrics on `:9090/metrics`:
 
 ### Debugging
 
+`/debug/allowlist` dumps every team's `ServiceEntry`-derived ACL entries, so
+unlike `/metrics` and `/healthz`/`/readyz` it only answers loopback callers —
+`kubectl exec` and `kubectl port-forward` both work (port-forward connects
+via the pod's own loopback interface), a direct pod-to-pod request from
+elsewhere in the cluster gets `403`.
+
 ```bash
 # Current allowlist
 kubectl -n istio-egress port-forward svc/istio-forward-proxy 9090:9090
