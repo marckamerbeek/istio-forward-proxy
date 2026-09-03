@@ -107,6 +107,18 @@ istio:
 
 # --------------------------------------------------------------------
 # NetworkPolicies
+#
+# Running Cilium as your CNI? Read
+# docs/EGRESS-ENFORCEMENT.md#cilium-ipblock-does-not-reach-cluster-internal-destinations
+# before relying on this section. The egress rules below use plain
+# `ipBlock` (see templates/networkpolicy.yaml), which under Cilium never
+# matches the Kubernetes API server or any other cluster-internal
+# destination, no matter how broad the CIDR — only genuinely external
+# ("world") traffic. This silently breaks the ServiceEntry watcher (hangs
+# forever on its initial List, /readyz never returns ok) and, if your
+# upstream proxy is itself in-cluster, the proxy chain too. Both need a
+# small supplementary CiliumNetworkPolicy — see that doc section for a
+# working example.
 # --------------------------------------------------------------------
 networkPolicies:
   egressFromProxy:

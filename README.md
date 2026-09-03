@@ -328,6 +328,8 @@ istio:
     #   - "cluster.local/ns/team-a/sa/app-x"
 
 # ── Network policies ──────────────────────────────────────────────────────────
+# Running Cilium? Read docs/EGRESS-ENFORCEMENT.md#cilium-ipblock-does-not-reach-cluster-internal-destinations
+# first — the ipBlock rules below don't behave the way they look under Cilium.
 networkPolicies:
   egressFromProxy:
     enabled: true
@@ -446,6 +448,14 @@ curl -s http://localhost:9090/healthz
 curl -s http://localhost:9090/readyz
 # Expected: {"status":"ok"} — only returns ok once ServiceEntry cache is synced
 ```
+
+> **`/readyz` never returns `ok`, and the logs just repeat "waiting for
+> ServiceEntry cache sync" with no error?** If you're running Cilium as
+> your CNI, this is almost always
+> [the `ipBlock` caveat](docs/EGRESS-ENFORCEMENT.md#cilium-ipblock-does-not-reach-cluster-internal-destinations),
+> not an application bug — the chart's default NetworkPolicy doesn't
+> actually grant the proxy access to the Kubernetes API server under
+> Cilium, despite looking permissive.
 
 **Inspect the current ACL allowlist:**
 

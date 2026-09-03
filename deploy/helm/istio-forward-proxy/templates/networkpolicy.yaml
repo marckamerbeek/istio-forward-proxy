@@ -25,6 +25,17 @@ spec:
           port: 53
     {{- end }}
     # Kubernetes API server (for ServiceEntry watch)
+    #
+    # On Cilium specifically: this ipBlock rule does NOT actually grant
+    # access, even though it looks maximally permissive. Cilium resolves
+    # the API server's real backend to its own reserved `kube-apiserver`
+    # identity, and ipBlock/CIDR rules only ever match "world" (external)
+    # traffic — never a reserved identity, regardless of CIDR breadth. On
+    # Cilium this silently manifests as the ServiceEntry watcher hanging
+    # forever on its initial List call ("waiting for ServiceEntry cache
+    # sync" with no further log output, /readyz never returns ok). See
+    # docs/EGRESS-ENFORCEMENT.md#cilium-ipblock-does-not-reach-cluster-internal-destinations
+    # for the fix (a supplementary CiliumNetworkPolicy).
     - to:
         - ipBlock:
             # cluster-admin moet dit evt. aanpassen voor eigen API CIDR
@@ -35,6 +46,14 @@ spec:
         - protocol: TCP
           port: 6443
     # Upstream proxy chain
+    #
+    # On Cilium: same caveat as above, but broader — ipBlock/CIDR rules
+    # never match ANY cluster-internal pod destination on Cilium, not just
+    # reserved identities like kube-apiserver. If your upstream proxy
+    # (proxy.upstream.host) is itself a Service in this cluster rather
+    # than a genuinely external host, this rule will not reach it either;
+    # see the same doc section for a working CiliumNetworkPolicy
+    # (toEndpoints) example.
     - to:
         {{- range .Values.networkPolicies.egressFromProxy.upstreamCIDRs }}
         - ipBlock:
