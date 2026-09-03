@@ -441,10 +441,11 @@ kubectl -n istio-egress get certificate
 kubectl -n istio-egress port-forward svc/istio-forward-proxy 9090:9090 &
 
 curl -s http://localhost:9090/healthz
-# Expected: {"status":"ok"}
+# Expected: ok
 
 curl -s http://localhost:9090/readyz
-# Expected: {"status":"ok"} — only returns ok once ServiceEntry cache is synced
+# Expected: ready — only returns this once ServiceEntry cache is synced;
+# a 503 with a plain-text body means it isn't yet
 ```
 
 **Inspect the current ACL allowlist:**
