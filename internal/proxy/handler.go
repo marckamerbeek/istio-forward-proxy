@@ -144,8 +144,13 @@ func (h *Handler) handleHTTPForward(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	// Same RFC 9110 §7.6.1 dynamic hop-by-hop set as writeProxyRequest,
+	// computed independently from THIS message's own Connection header --
+	// the upstream response is a separate message from the request, with
+	// its own (possibly empty) Connection value.
+	respHopByHop := hopByHopHeaders(resp.Header)
 	for k, vv := range resp.Header {
-		if isHopByHop(k) {
+		if respHopByHop[strings.ToLower(k)] {
 			continue
 		}
 		for _, v := range vv {
@@ -184,6 +189,13 @@ func (h *Handler) writeProxyRequest(w io.Writer, r *http.Request) error {
 	if err := writeHeader(w, "Host", r.Host); err != nil {
 		return err
 	}
+	// RFC 9110 §7.6.3 -- identify this proxy in the forwarding chain. Any
+	// Via the request already carries (from an upstream client-side proxy)
+	// passes through untouched via the header loop below; this only adds
+	// this hop's own entry.
+	if err := writeHeader(w, "Via", "1.1 istio-forward-proxy"); err != nil {
+		return err
+	}
 	if h.UpstreamAuth != "" {
 		if err := writeHeader(w, "Proxy-Authorization", h.UpstreamAuth); err != nil {
 			return err
@@ -195,8 +207,9 @@ func (h *Handler) writeProxyRequest(w io.Writer, r *http.Request) error {
 		}
 	}
 
+	hopByHop := hopByHopHeaders(r.Header)
 	for k, vv := range r.Header {
-		if isHopByHop(k) || strings.EqualFold(k, "Host") || strings.EqualFold(k, "Proxy-Authorization") {
+		if hopByHop[strings.ToLower(k)] || strings.EqualFold(k, "Host") || strings.EqualFold(k, "Proxy-Authorization") {
 			continue
 		}
 		for _, v := range vv {
@@ -440,14 +453,28 @@ func writeHeader(w io.Writer, name, value string) error {
 	return err
 }
 
-// isHopByHop reports whether a header is hop-by-hop and must not be forwarded.
-func isHopByHop(name string) bool {
-	switch strings.ToLower(name) {
-	case "connection", "keep-alive", "proxy-authenticate",
-		"proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade":
-		return true
+// hopByHopHeaders returns the set of lower-cased header names that must not
+// be forwarded for this specific message (RFC 9110 §7.6.1): the fixed set
+// of registered hop-by-hop header names, PLUS any header named in this
+// message's own Connection header value. A header field only listed in
+// Connection -- not one of the registered names -- is hop-by-hop for this
+// message alone; a naive check against only the fixed set misses it and
+// forwards it through to the next hop unchanged.
+func hopByHopHeaders(h http.Header) map[string]bool {
+	set := map[string]bool{
+		"connection": true, "keep-alive": true, "proxy-authenticate": true,
+		"proxy-authorization": true, "te": true, "trailers": true,
+		"transfer-encoding": true, "upgrade": true,
 	}
-	return false
+	for _, line := range h.Values("Connection") {
+		for _, name := range strings.Split(line, ",") {
+			name = strings.ToLower(strings.TrimSpace(name))
+			if name != "" {
+				set[name] = true
+			}
+		}
+	}
+	return set
 }
 
 func splitHostPort(hostport string, defaultPort uint32) (string, uint32) {

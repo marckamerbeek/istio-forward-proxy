@@ -110,6 +110,87 @@ func TestHopByHopHeadersStripped(t *testing.T) {
 	}
 }
 
+// TestViaHeaderAdded verifies that RFC 9110 §7.6.3's Via header is added
+// to the upstream request, identifying this proxy in the forwarding chain.
+func TestViaHeaderAdded(t *testing.T) {
+	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	h := &Handler{}
+	var buf strings.Builder
+	if err := h.writeProxyRequest(&nopWriteConn{Builder: &buf}, req); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "Via: 1.1 istio-forward-proxy\r\n") {
+		t.Errorf("Via header not found in:\n%s", buf.String())
+	}
+}
+
+// TestViaHeaderChained verifies that an existing Via header from an
+// upstream client-side proxy is preserved alongside this proxy's own new
+// entry, rather than being overwritten -- Via is meant to accumulate one
+// entry per hop (RFC 9110 §7.6.3).
+func TestViaHeaderChained(t *testing.T) {
+	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	req.Header.Set("Via", "1.1 upstream-client-proxy")
+	h := &Handler{}
+	var buf strings.Builder
+	if err := h.writeProxyRequest(&nopWriteConn{Builder: &buf}, req); err != nil {
+		t.Fatal(err)
+	}
+	s := buf.String()
+	if !strings.Contains(s, "Via: 1.1 istio-forward-proxy\r\n") {
+		t.Errorf("this hop's own Via entry not found in:\n%s", s)
+	}
+	if !strings.Contains(s, "Via: 1.1 upstream-client-proxy\r\n") {
+		t.Errorf("existing Via entry from the client side was dropped, not chained:\n%s", s)
+	}
+}
+
+// TestDynamicHopByHopHeaderStripped verifies RFC 9110 §7.6.1: a header
+// field NAMED in the Connection header's own value is hop-by-hop for that
+// message alone, even if it isn't one of the fixed, registered hop-by-hop
+// names (Connection, Keep-Alive, etc.) that TestHopByHopHeadersStripped
+// above already covers. A proxy that only checks the fixed set forwards
+// this straight through to the next hop, unstripped.
+func TestDynamicHopByHopHeaderStripped(t *testing.T) {
+	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	req.Header.Set("Connection", "X-Session-Token")
+	req.Header.Set("X-Session-Token", "should-not-leak")
+	req.Header.Set("X-Custom-App", "keepme")
+
+	h := &Handler{}
+	var buf strings.Builder
+	if err := h.writeProxyRequest(&nopWriteConn{Builder: &buf}, req); err != nil {
+		t.Fatal(err)
+	}
+	s := buf.String()
+	if strings.Contains(s, "X-Session-Token") {
+		t.Errorf("header named in Connection value should have been stripped as hop-by-hop, found in:\n%s", s)
+	}
+	if !strings.Contains(s, "X-Custom-App: keepme") {
+		t.Error("ordinary end-to-end header not listed in Connection should still be forwarded")
+	}
+}
+
+// TestDynamicHopByHopHeaderStripped_MultipleAndCaseInsensitive verifies the
+// same rule for a comma-separated Connection value naming more than one
+// header, matched case-insensitively as header names always are.
+func TestDynamicHopByHopHeaderStripped_MultipleAndCaseInsensitive(t *testing.T) {
+	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	req.Header.Set("Connection", "X-First, x-second")
+	req.Header.Set("X-First", "leak-1")
+	req.Header.Set("X-Second", "leak-2")
+
+	h := &Handler{}
+	var buf strings.Builder
+	if err := h.writeProxyRequest(&nopWriteConn{Builder: &buf}, req); err != nil {
+		t.Fatal(err)
+	}
+	s := buf.String()
+	if strings.Contains(s, "leak-1") || strings.Contains(s, "leak-2") {
+		t.Errorf("both headers listed in a comma-separated Connection value should have been stripped, found in:\n%s", s)
+	}
+}
+
 // TestExtraHeadersAppended verifies that configured extra headers are forwarded.
 func TestExtraHeadersAppended(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://example.com/", nil)
