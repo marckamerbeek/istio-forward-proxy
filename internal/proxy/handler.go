@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
@@ -206,12 +207,46 @@ func (h *Handler) writeProxyRequest(w io.Writer, r *http.Request) error {
 		}
 	}
 
+	hasBody := r.Body != nil && r.Body != http.NoBody
+
+	// A request whose length is unknown (net/http sets ContentLength -1 for
+	// this) had Transfer-Encoding: chunked on the wire from the client -- and
+	// net/http already stripped that header out of r.Header above, consuming
+	// it into r.TransferEncoding instead. Without re-declaring some framing
+	// here, the body below would go out with neither Content-Length nor
+	// Transfer-Encoding: the upstream reads a zero-length body, considers the
+	// request complete, and parses the body bytes that follow as the start of
+	// the next request on the same connection. Re-chunk instead of buffering
+	// to compute Content-Length, so streaming a body larger than memory still
+	// works.
+	chunked := hasBody && r.ContentLength < 0
+	if chunked {
+		if err := writeHeader(w, "Transfer-Encoding", "chunked"); err != nil {
+			return err
+		}
+	}
+
 	if _, err := w.Write([]byte("\r\n")); err != nil {
 		return err
 	}
 
-	if r.Body != nil && r.Body != http.NoBody {
-		n, err := io.Copy(w, r.Body)
+	if hasBody {
+		var n int64
+		var err error
+		if chunked {
+			cw := httputil.NewChunkedWriter(w)
+			if n, err = io.Copy(cw, r.Body); err == nil {
+				if err = cw.Close(); err == nil {
+					// cw.Close() only emits the "0\r\n" last-chunk line; the
+					// empty trailer section still needs its own terminating
+					// CRLF (RFC 9112 §7.1.3) or the upstream blocks waiting
+					// for a trailer field that never arrives.
+					_, err = w.Write([]byte("\r\n"))
+				}
+			}
+		} else {
+			n, err = io.Copy(w, r.Body)
+		}
 		if err != nil {
 			return err
 		}
