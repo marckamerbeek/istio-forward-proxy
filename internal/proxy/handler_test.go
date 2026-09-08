@@ -2,9 +2,9 @@ package proxy
 
 import (
 	"bufio"
-	"io"
 	"crypto/tls"
 	"crypto/x509"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -217,6 +217,8 @@ func TestChunkedRequestBodyReframed(t *testing.T) {
 	if _, err := br.ReadByte(); err != io.EOF {
 		t.Errorf("trailing bytes after the framed request (would be parsed as the next request-line), read err = %v", err)
 	}
+}
+
 // TestAuditIdentityNotForgeable verifies the fix for
 // istio-forward-proxy-acceptance-review finding F1: a client could dictate
 // its own SPIFFE identity in the audit log via a self-supplied

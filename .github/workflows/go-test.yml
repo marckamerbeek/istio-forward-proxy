@@ -1,0 +1,31 @@
+name: Go Vet & Test
+
+# Neither the Docker build (security-scan.yml) nor the perf test compiles
+# _test.go files -- `go build` skips them entirely -- so a syntax error
+# confined to a _test.go file, e.g. one introduced by a bad merge, passes
+# every other check in this repo silently. This workflow is what actually
+# catches that class of bug.
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  vet-and-test:
+    name: vet & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
