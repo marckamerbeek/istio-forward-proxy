@@ -79,6 +79,7 @@ func main() {
 		IdleTimeout:        cfg.idleTimeout,
 		TLSEnabled:         cfg.mtlsEnabled,
 		InsecureSkipVerify: cfg.insecureSkipVerify,
+		TrustXFCCHeader:    cfg.trustXFCCHeader,
 		Logger:             logger,
 	}
 
@@ -186,6 +187,7 @@ type config struct {
 	writeTimeout       time.Duration
 	mtlsEnabled        bool
 	insecureSkipVerify bool
+	trustXFCCHeader    bool
 }
 
 func parseFlags() *config {
@@ -209,6 +211,11 @@ func parseFlags() *config {
 		"enable mTLS origination to upstream proxy")
 	flag.BoolVar(&cfg.insecureSkipVerify, "insecure-skip-verify", envOrBool("INSECURE_SKIP_VERIFY", false),
 		"skip TLS verification of upstream (testing only, never use in production)")
+	flag.BoolVar(&cfg.trustXFCCHeader, "trust-xfcc-header", envOrBool("TRUST_XFCC_HEADER", false),
+		"trust a client-supplied X-Forwarded-Client-Cert header for audit identity when there is no "+
+			"verified mTLS peer certificate (e.g. ambient mode, where ztunnel terminates mTLS at L4). "+
+			"Only enable this if something in front of this proxy -- a waypoint, not ztunnel itself -- "+
+			"actually sanitizes and re-sets that header; otherwise any client can forge its own audit identity")
 	flag.DurationVar(&cfg.dialTimeout, "dial-timeout", 10*time.Second,
 		"timeout for upstream dial")
 	flag.DurationVar(&cfg.idleTimeout, "idle-timeout", 90*time.Second,

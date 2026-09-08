@@ -47,10 +47,12 @@ background it watches the Kubernetes API for `ServiceEntry` objects
 anywhere in the cluster and keeps an in-memory allowlist up to date.
 
 If a requested host isn't covered by any `ServiceEntry`, the request is
-denied with `403 Forbidden` and the attempt is logged, including the
-SPIFFE identity of the pod that made it. If the host is covered, the
-request goes through with the absolute path intact, over mTLS, to the
-existing upstream proxy chain.
+denied with `403 Forbidden` and the attempt is logged, with the caller's
+SPIFFE identity attached when it's available in verified form (see
+[Audit identity](#audit-identity) below — in ambient mode, without a
+waypoint in front of this proxy, it currently isn't). If the host is
+covered, the request goes through with the absolute path intact, over
+mTLS, to the existing upstream proxy chain.
 
 That makes "no ServiceEntry, no access" a rule that is actually enforced
 and auditable for all outbound traffic, the same zero-trust approach Istio
@@ -77,7 +79,7 @@ sequenceDiagram
     end
 
     Pod->>zt: GET http://api.example.com/<br/>(via HTTP_PROXY)
-    zt->>fp: HBONE mTLS + pod's<br/>SPIFFE identity
+    zt->>fp: HBONE mTLS terminated by zt,<br/>plain HTTP delivered locally
     fp->>fp: is host in the allowlist?
 
     alt Host is covered by a ServiceEntry → allowed
@@ -110,11 +112,12 @@ In short:
 Pod (HTTP_PROXY=forward-proxy:3128)
  │  plain HTTP with absolute path
  ▼
-ztunnel (HBONE mTLS, SPIFFE identity preserved)
+ztunnel (terminates HBONE mTLS at L4,
+         delivers plain HTTP -- does not forward pod identity)
  ▼
 istio-forward-proxy (this repo)
  │  ACL check via ServiceEntry allowlist
- │  Audit log with SPIFFE identity
+ │  Audit log, SPIFFE identity when verifiable (see Audit identity)
  │  mTLS origination with client certificate
  ▼
 upstream proxy chain
@@ -132,12 +135,41 @@ external destination
 | CONNECT tunnel support | For HTTPS traffic with upstream auth |
 | mTLS origination | Client cert via cert-manager, hot-reload on rotation |
 | ServiceEntry-based ACL | Only registered hosts are allowed through |
-| SPIFFE audit logging | Pod identity per connection in structured logs |
+| SPIFFE audit logging | Pod identity per connection in structured logs, when verifiable (see [Audit identity](#audit-identity)) |
 | Proxy-Authorization injection | Credentials forwarded to upstream chain |
 | Custom header injection | Via `extraHeaders` in values.yaml |
 | Prometheus metrics | `/metrics` endpoint with counters and gauges |
 | HPA + PDB | Horizontal scaling with graceful disruption |
 | Istio ambient integration | `dataplane-mode=ambient` label, PeerAuthentication STRICT |
+
+## Audit identity
+
+The audit log's `spiffe` field is only populated from a source the proxy can
+actually verify:
+
+1. A real mTLS peer certificate on the connection (`r.TLS`), when this
+   proxy terminates TLS itself.
+2. Otherwise, the `X-Forwarded-Client-Cert` header -- but only when
+   `TRUST_XFCC_HEADER=true` (`proxy.audit.trustXFCCHeader` in the Helm
+   chart) is explicitly set.
+
+`TRUST_XFCC_HEADER` defaults to `false`. In an ambient-mode deployment as
+described above, `r.TLS` is always `nil`: ztunnel terminates HBONE mTLS at
+L4 and hands this proxy plain TCP, and being an L4 proxy it never parses
+HTTP, so it neither sets nor strips `X-Forwarded-Client-Cert` on the way
+through. With the default off, that means the `spiffe` field is empty for
+every request in this topology as shipped today -- which is honest: there
+is currently nothing in front of this proxy that verifies a caller's
+identity at the HTTP layer, so nothing is asserted.
+
+Turning `TRUST_XFCC_HEADER` on without addressing that gap does not fix it;
+it just lets any caller write an arbitrary identity into the audit trail by
+setting that header itself. Only enable it once something upstream of this
+proxy actually sanitizes and re-sets `X-Forwarded-Client-Cert` from its own
+verified state -- e.g. an Istio ambient waypoint (an L7-aware Envoy
+instance, unlike ztunnel) placed in front of this proxy. Envoy itself
+defaults the equivalent setting, `forward_client_cert_details`, to
+`SANITIZE` for the same reason.
 
 ## Project layout
 
@@ -568,8 +600,11 @@ Adjust the `NO_PROXY` value to match your cluster's internal CIDRs so that
 in-cluster traffic bypasses the proxy.
 
 The pod's namespace must be enrolled in Istio ambient mode. ztunnel intercepts
-traffic and attaches the pod's SPIFFE identity, which the proxy logs in the
-audit trail.
+and encrypts the traffic in transit, but -- as covered in
+[Audit identity](#audit-identity) -- terminates that encryption itself before
+this proxy ever sees the request, so the `spiffe` field in the audit trail
+is empty unless `TRUST_XFCC_HEADER` is set with a trusted hop in front to
+back it.
 
 ```bash
 # Enroll a namespace in ambient mode:
