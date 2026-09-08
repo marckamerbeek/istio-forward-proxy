@@ -294,6 +294,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		requestsTotal.WithLabelValues("CONNECT", "upstream_error").Inc()
 		return
 	}
+	upstream = wrapIdleTimeout(upstream, h.IdleTimeout)
 	defer upstream.Close()
 	activeConnections.Inc()
 	defer activeConnections.Dec()
@@ -352,7 +353,13 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 		_, _ = clientBuf.Reader.Discard(clientBuf.Reader.Buffered())
 	}
 
-	bytesIn, bytesOut := tunnel(clientConn, upstream)
+	// Wrapping only clientConn here (upstream is already wrapped, from right
+	// after dialUpstream) is enough to bound the whole tunnel: each
+	// direction's io.Copy inside tunnel() does a Read on one connection and
+	// a Write on the other per chunk relayed, so traffic in EITHER direction
+	// resets BOTH connections' deadlines -- this behaves as one shared idle
+	// timer for the tunnel as a whole, not two independent per-leg timers.
+	bytesIn, bytesOut := tunnel(wrapIdleTimeout(clientConn, h.IdleTimeout), upstream)
 	bytesTransferred.WithLabelValues("client_to_upstream").Add(float64(bytesOut))
 	bytesTransferred.WithLabelValues("upstream_to_client").Add(float64(bytesIn))
 
@@ -501,6 +508,15 @@ func wrapIdleTimeout(conn net.Conn, timeout time.Duration) net.Conn {
 // io.Copy call through to the underlying connection, i.e. exactly when the
 // connection was NOT idle -- turns it into the idle timeout the flag name
 // promises.
+//
+// handleConnect wraps both legs of an established CONNECT tunnel with this
+// too (finding F10, issue #28): previously neither handleConnect nor
+// tunnel() set any deadline at all, so an abandoned tunnel -- opened, then
+// never closed cleanly by the client -- pinned a goroutine and two file
+// descriptors on this proxy forever. Wrapping both connections is enough to
+// bound the tunnel as a whole rather than each leg independently: every
+// chunk tunnel() relays does a Read on one connection and a Write on the
+// other, so traffic in either direction resets both connections' deadlines.
 type idleTimeoutConn struct {
 	net.Conn
 	timeout time.Duration
