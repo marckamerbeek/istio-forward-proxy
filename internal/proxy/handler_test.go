@@ -3,8 +3,11 @@ package proxy
 import (
 	"bufio"
 	"io"
+	"crypto/tls"
+	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -214,6 +217,57 @@ func TestChunkedRequestBodyReframed(t *testing.T) {
 	if _, err := br.ReadByte(); err != io.EOF {
 		t.Errorf("trailing bytes after the framed request (would be parsed as the next request-line), read err = %v", err)
 	}
+// TestAuditIdentityNotForgeable verifies the fix for
+// istio-forward-proxy-acceptance-review finding F1: a client could dictate
+// its own SPIFFE identity in the audit log via a self-supplied
+// X-Forwarded-Client-Cert header, since in ambient mode there's never a
+// verified mTLS peer certificate to check it against (ztunnel terminates
+// mTLS at L4 and doesn't touch this header). The header must now be ignored
+// unless the operator explicitly opts in via TrustXFCCHeader, and a real
+// verified peer certificate must always take precedence over it either way.
+func TestAuditIdentityNotForgeable(t *testing.T) {
+	const forgedHeader = `By=spiffe://cluster.local/ns/istio-egress/sa/forward-proxy;Hash=abc123;URI="spiffe://cluster.local/ns/kube-system/sa/cluster-admin"`
+
+	t.Run("XFCC header ignored by default", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "http://example.com/", nil)
+		req.Header.Set("X-Forwarded-Client-Cert", forgedHeader)
+
+		h := &Handler{}
+		if got := h.spiffeFromRequest(req); got != "" {
+			t.Errorf("client-supplied XFCC header was trusted by default: got %q, want \"\"", got)
+		}
+	})
+
+	t.Run("XFCC header used once explicitly trusted", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "http://example.com/", nil)
+		req.Header.Set("X-Forwarded-Client-Cert", forgedHeader)
+
+		h := &Handler{TrustXFCCHeader: true}
+		want := "spiffe://cluster.local/ns/kube-system/sa/cluster-admin"
+		if got := h.spiffeFromRequest(req); got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("verified peer certificate always wins over the header", func(t *testing.T) {
+		certURI, err := url.Parse("spiffe://cluster.local/ns/team-a/sa/app-x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest("GET", "http://example.com/", nil)
+		req.Header.Set("X-Forwarded-Client-Cert", forgedHeader)
+		req.TLS = &tls.ConnectionState{
+			PeerCertificates: []*x509.Certificate{{URIs: []*url.URL{certURI}}},
+		}
+
+		for _, trust := range []bool{false, true} {
+			h := &Handler{TrustXFCCHeader: trust}
+			want := "spiffe://cluster.local/ns/team-a/sa/app-x"
+			if got := h.spiffeFromRequest(req); got != want {
+				t.Errorf("TrustXFCCHeader=%v: got %q, want %q (verified cert should always win)", trust, got, want)
+			}
+		}
+	})
 }
 
 // TestNonAbsoluteURIRejected verifies that non-proxy requests receive a 400.

@@ -76,7 +76,14 @@ type Handler struct {
 	IdleTimeout        time.Duration
 	TLSEnabled         bool
 	InsecureSkipVerify bool
-	Logger             *slog.Logger
+	// TrustXFCCHeader allows a client-supplied X-Forwarded-Client-Cert header
+	// to populate the audit log's SPIFFE identity when there is no verified
+	// mTLS peer certificate on the connection. Off by default: nothing
+	// between an ambient-mode client and this proxy verifies that header, so
+	// trusting it would let a caller dictate its own audit identity. See
+	// spiffeFromRequest.
+	TrustXFCCHeader bool
+	Logger          *slog.Logger
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -160,7 +167,7 @@ func (h *Handler) handleHTTPForward(w http.ResponseWriter, r *http.Request) {
 	h.Audit.Log(audit.Event{
 		Timestamp:     start,
 		ClientAddr:    r.RemoteAddr,
-		SPIFFE:        spiffeFromRequest(r),
+		SPIFFE:        h.spiffeFromRequest(r),
 		Method:        "HTTP-FORWARD",
 		TargetHost:    targetHost,
 		TargetPort:    targetPort,
@@ -355,7 +362,7 @@ func (h *Handler) handleConnect(w http.ResponseWriter, r *http.Request) {
 	h.Audit.Log(audit.Event{
 		Timestamp:     start,
 		ClientAddr:    r.RemoteAddr,
-		SPIFFE:        spiffeFromRequest(r),
+		SPIFFE:        h.spiffeFromRequest(r),
 		Method:        "CONNECT",
 		TargetHost:    targetHost,
 		TargetPort:    targetPort,
@@ -410,7 +417,7 @@ func (h *Handler) denyForward(w http.ResponseWriter, r *http.Request, host strin
 	h.Audit.Log(audit.Event{
 		Timestamp:  time.Now(),
 		ClientAddr: r.RemoteAddr,
-		SPIFFE:     spiffeFromRequest(r),
+		SPIFFE:     h.spiffeFromRequest(r),
 		Method:     "HTTP-FORWARD",
 		TargetHost: host,
 		TargetPort: port,
@@ -426,7 +433,7 @@ func (h *Handler) denyConnect(w http.ResponseWriter, r *http.Request, host strin
 	h.Audit.Log(audit.Event{
 		Timestamp:  time.Now(),
 		ClientAddr: r.RemoteAddr,
-		SPIFFE:     spiffeFromRequest(r),
+		SPIFFE:     h.spiffeFromRequest(r),
 		Method:     "CONNECT",
 		TargetHost: host,
 		TargetPort: port,
@@ -504,24 +511,36 @@ func defaultPortForScheme(scheme string) uint32 {
 	return 80
 }
 
-// spiffeFromRequest extracts the SPIFFE URI from the client certificate as
-// forwarded by ztunnel. In ambient mode ztunnel initiates the HBONE mTLS
-// connection and presents the pod's SPIFFE identity.
+// spiffeFromRequest extracts the SPIFFE URI identifying the caller, for the
+// audit log. A verified mTLS peer certificate is always preferred when one
+// is present on the connection.
 //
-// When the proxy receives plain HTTP after HBONE decryption by ztunnel, the
-// identity may be forwarded in the X-Forwarded-Client-Cert header via a pod
-// label or custom authz filter.
-func spiffeFromRequest(r *http.Request) string {
-	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-		if v := r.Header.Get("X-Forwarded-Client-Cert"); v != "" {
-			return extractSPIFFEFromXFCC(v)
+// In ambient mode there never is one: ztunnel terminates HBONE mTLS itself
+// at L4 and hands this proxy plain TCP, so r.TLS is nil regardless of what
+// PeerAuthentication enforces. ztunnel does not parse HTTP, so it neither
+// sets nor strips an X-Forwarded-Client-Cert header -- anything a client
+// sends there reaches this handler completely unverified. Trusting it by
+// default would let any caller dictate its own identity in the audit trail
+// (see istio-forward-proxy-acceptance-review finding F1), so it's only
+// consulted when h.TrustXFCCHeader is explicitly enabled. Turn that on only
+// when something in front of this proxy actually guarantees the header
+// can't originate from the client itself -- e.g. an L7-aware hop (a
+// waypoint) that sanitizes and re-sets it from its own verified mTLS state.
+// Envoy, which this project positions against, defaults to the equivalent
+// of this off (forward_client_cert_details: SANITIZE).
+func (h *Handler) spiffeFromRequest(r *http.Request) string {
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		for _, uri := range r.TLS.PeerCertificates[0].URIs {
+			if uri.Scheme == "spiffe" {
+				return uri.String()
+			}
 		}
+	}
+	if !h.TrustXFCCHeader {
 		return ""
 	}
-	for _, uri := range r.TLS.PeerCertificates[0].URIs {
-		if uri.Scheme == "spiffe" {
-			return uri.String()
-		}
+	if v := r.Header.Get("X-Forwarded-Client-Cert"); v != "" {
+		return extractSPIFFEFromXFCC(v)
 	}
 	return ""
 }
