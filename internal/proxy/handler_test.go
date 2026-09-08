@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"io"
 	"crypto/tls"
 	"crypto/x509"
 	"net/http"
@@ -154,6 +155,68 @@ func TestHostHeaderSet(t *testing.T) {
 	}
 }
 
+// TestChunkedRequestBodyReframed verifies the fix for a request-smuggling
+// primitive (istio-forward-proxy-acceptance-review finding F2): a client
+// request with Transfer-Encoding: chunked was forwarded with neither
+// Transfer-Encoding nor Content-Length, so the upstream read it as a
+// zero-length body and parsed the still-arriving body bytes as the start of
+// the next request on the same connection.
+//
+// req is built via http.ReadRequest from a raw chunked request, exactly as
+// net/http hands it to a real server: Transfer-Encoding is already stripped
+// out of req.Header (moved to req.TransferEncoding) and req.ContentLength is
+// -1, so this exercises the real production code path rather than a
+// synthetic stand-in.
+func TestChunkedRequestBodyReframed(t *testing.T) {
+	raw := "POST http://echo-origin.echo-origin.svc.cluster.local/echo HTTP/1.1\r\n" +
+		"Host: echo-origin.echo-origin.svc.cluster.local\r\n" +
+		"Transfer-Encoding: chunked\r\n" +
+		"\r\n" +
+		"5\r\nhello\r\n0\r\n\r\n"
+
+	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+	if err != nil {
+		t.Fatalf("constructing test request: %v", err)
+	}
+	if req.ContentLength != -1 {
+		t.Fatalf("test premise broken: expected ContentLength -1 for a chunked request, got %d", req.ContentLength)
+	}
+	if _, present := req.Header["Transfer-Encoding"]; present {
+		t.Fatalf("test premise broken: expected net/http to strip Transfer-Encoding out of Header")
+	}
+
+	var buf strings.Builder
+	h := &Handler{}
+	if err := h.writeProxyRequest(&nopWriteConn{Builder: &buf}, req); err != nil {
+		t.Fatalf("writeProxyRequest: %v", err)
+	}
+	out := buf.String()
+
+	if !strings.Contains(out, "Transfer-Encoding: chunked\r\n") {
+		t.Fatalf("upstream request has no body-framing header at all:\n%s", out)
+	}
+
+	// The upstream sees exactly this: parse it back with a real HTTP parser,
+	// the way a proxy or origin one hop further out would.
+	br := bufio.NewReader(strings.NewReader(out))
+	parsed, err := http.ReadRequest(br)
+	if err != nil {
+		t.Fatalf("upstream could not parse the forwarded request: %v\nwire bytes:\n%s", err, out)
+	}
+	body, err := io.ReadAll(parsed.Body)
+	if err != nil {
+		t.Fatalf("upstream could not read the forwarded body: %v", err)
+	}
+	if string(body) != "hello" {
+		t.Errorf("body = %q, want %q", body, "hello")
+	}
+
+	// Nothing must be left on the connection after the framed request+body:
+	// that's exactly the smuggled bytes a next hop would read as a new
+	// request-line.
+	if _, err := br.ReadByte(); err != io.EOF {
+		t.Errorf("trailing bytes after the framed request (would be parsed as the next request-line), read err = %v", err)
+	}
 // TestAuditIdentityNotForgeable verifies the fix for
 // istio-forward-proxy-acceptance-review finding F1: a client could dictate
 // its own SPIFFE identity in the audit log via a self-supplied
