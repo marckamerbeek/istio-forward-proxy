@@ -10,172 +10,205 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// TestAbsolutePathPreservation verifies the core property of this proxy:
-// the request-line sent to the upstream preserves the ABSOLUTE URI as
-// required by RFC 7230 §5.3.2 for proxy requests.
-func TestAbsolutePathPreservation(t *testing.T) {
-	cases := []struct {
-		name     string
-		inputURL string
-		method   string
-		wantLine string
-	}{
-		{
-			name:     "simple GET",
-			inputURL: "http://edition.cnn.com/politics",
-			method:   "GET",
-			wantLine: "GET http://edition.cnn.com/politics HTTP/1.1",
-		},
-		{
-			name:     "with query string",
-			inputURL: "http://api.example.com/v1/users?page=2&limit=50",
-			method:   "GET",
-			wantLine: "GET http://api.example.com/v1/users?page=2&limit=50 HTTP/1.1",
-		},
-		{
-			name:     "with explicit port",
-			inputURL: "http://internal.corp:8080/healthz",
-			method:   "GET",
-			wantLine: "GET http://internal.corp:8080/healthz HTTP/1.1",
-		},
-		{
-			name:     "POST request",
-			inputURL: "http://api.example.com/submit",
-			method:   "POST",
-			wantLine: "POST http://api.example.com/submit HTTP/1.1",
-		},
-	}
+// TestBuildUpstreamRequest covers what writeProxyRequest's dedicated tests
+// used to check directly on the raw bytes it wrote to the wire: since
+// buildUpstreamRequest instead produces an *http.Request for
+// Transport.RoundTrip to write (see buildTransport for why), the
+// equivalent guarantees are checked on that request object.
+func TestBuildUpstreamRequest(t *testing.T) {
+	t.Run("absolute-form URL, Host, and RequestURI", func(t *testing.T) {
+		// RFC 7230 §5.3.2: a proxy request's target must be the absolute
+		// URI, which is what Transport.Proxy makes Transport write to the
+		// upstream -- the core difference from Envoy, which rewrites to a
+		// relative path.
+		cases := []struct {
+			name     string
+			inputURL string
+			wantURL  string
+			wantHost string
+		}{
+			{"simple GET", "http://edition.cnn.com/politics", "http://edition.cnn.com/politics", "edition.cnn.com"},
+			{"with query string", "http://api.example.com/v1/users?page=2&limit=50", "http://api.example.com/v1/users?page=2&limit=50", "api.example.com"},
+			{"with explicit port", "http://internal.corp:8080/healthz", "http://internal.corp:8080/healthz", "internal.corp:8080"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				req := httptest.NewRequest("GET", tc.inputURL, nil)
+				h := &Handler{}
+				outReq, _, err := h.buildUpstreamRequest(req)
+				if err != nil {
+					t.Fatalf("buildUpstreamRequest: %v", err)
+				}
+				if got := outReq.URL.String(); got != tc.wantURL {
+					t.Errorf("URL = %q, want %q", got, tc.wantURL)
+				}
+				if outReq.Host != tc.wantHost {
+					t.Errorf("Host = %q, want %q", outReq.Host, tc.wantHost)
+				}
+				if outReq.RequestURI != "" {
+					t.Errorf("RequestURI = %q, want empty (Transport.RoundTrip refuses a request with this set)", outReq.RequestURI)
+				}
+			})
+		}
+	})
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.inputURL, nil)
-			var buf strings.Builder
-			h := &Handler{UpstreamAuth: ""}
-			if err := h.writeProxyRequest(&nopWriteConn{Builder: &buf}, req); err != nil {
-				t.Fatalf("writeProxyRequest: %v", err)
-			}
+	t.Run("Proxy-Authorization is ours, not the client's", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "http://example.com/", nil)
+		req.Header.Set("Proxy-Authorization", "Basic shouldbeoverwritten")
+		h := &Handler{UpstreamAuth: "Basic correct"}
+		outReq, _, err := h.buildUpstreamRequest(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := outReq.Header.Get("Proxy-Authorization"); got != "Basic correct" {
+			t.Errorf("Proxy-Authorization = %q, want %q (client-supplied value must not leak upstream)", got, "Basic correct")
+		}
+	})
 
-			gotFirstLine := strings.SplitN(buf.String(), "\r\n", 2)[0]
-			if gotFirstLine != tc.wantLine {
-				t.Errorf("request-line = %q, want %q", gotFirstLine, tc.wantLine)
-			}
-		})
-	}
-}
+	t.Run("hop-by-hop headers stripped, end-to-end headers kept", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "http://example.com/", nil)
+		req.Header.Set("Connection", "close")
+		req.Header.Set("Keep-Alive", "timeout=5")
+		req.Header.Set("X-Custom-App", "keepme")
+		h := &Handler{}
+		outReq, _, err := h.buildUpstreamRequest(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if outReq.Header.Get("Connection") != "" {
+			t.Error("Connection header should have been stripped")
+		}
+		if outReq.Header.Get("Keep-Alive") != "" {
+			t.Error("Keep-Alive header should have been stripped")
+		}
+		if got := outReq.Header.Get("X-Custom-App"); got != "keepme" {
+			t.Errorf("end-to-end header X-Custom-App = %q, want %q", got, "keepme")
+		}
+	})
 
-// TestProxyAuthorizationInjected verifies that the Proxy-Authorization header
-// is correctly added to upstream requests.
-func TestProxyAuthorizationInjected(t *testing.T) {
-	req := httptest.NewRequest("GET", "http://example.com/", nil)
-	h := &Handler{UpstreamAuth: "Basic dXNlcjpwYXNz"}
-
-	var buf strings.Builder
-	if err := h.writeProxyRequest(&nopWriteConn{Builder: &buf}, req); err != nil {
-		t.Fatal(err)
-	}
-
-	if !strings.Contains(buf.String(), "Proxy-Authorization: Basic dXNlcjpwYXNz\r\n") {
-		t.Errorf("Proxy-Authorization not found in:\n%s", buf.String())
-	}
-}
-
-// TestHopByHopHeadersStripped verifies that hop-by-hop headers from the client
-// are not forwarded to the upstream.
-func TestHopByHopHeadersStripped(t *testing.T) {
-	req := httptest.NewRequest("GET", "http://example.com/", nil)
-	req.Header.Set("Connection", "close")
-	req.Header.Set("Keep-Alive", "timeout=5")
-	req.Header.Set("Proxy-Authorization", "Basic shouldbeoverwritten")
-	req.Header.Set("X-Custom-App", "keepme")
-
-	h := &Handler{UpstreamAuth: "Basic correct"}
-	var buf strings.Builder
-	if err := h.writeProxyRequest(&nopWriteConn{Builder: &buf}, req); err != nil {
-		t.Fatal(err)
-	}
-
-	s := buf.String()
-	if strings.Contains(s, "Connection: close") {
-		t.Error("Connection header should have been stripped")
-	}
-	if strings.Contains(s, "Keep-Alive:") {
-		t.Error("Keep-Alive header should have been stripped")
-	}
-	if !strings.Contains(s, "Proxy-Authorization: Basic correct") {
-		t.Error("Proxy-Authorization should be our own, not client's")
-	}
-	if strings.Contains(s, "Basic shouldbeoverwritten") {
-		t.Error("Client's Proxy-Authorization leaked into upstream")
-	}
-	if !strings.Contains(s, "X-Custom-App: keepme") {
-		t.Error("End-to-end custom header should be preserved")
-	}
-}
-
-// TestExtraHeadersAppended verifies that configured extra headers are forwarded.
-func TestExtraHeadersAppended(t *testing.T) {
-	req := httptest.NewRequest("GET", "http://example.com/", nil)
-	h := &Handler{
-		ExtraHeaders: map[string]string{
+	t.Run("extra headers set", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "http://example.com/", nil)
+		h := &Handler{ExtraHeaders: map[string]string{
 			"X-Corp-Id":    "corp-123",
 			"X-Request-By": "forward-proxy",
-		},
+		}}
+		outReq, _, err := h.buildUpstreamRequest(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := outReq.Header.Get("X-Corp-Id"); got != "corp-123" {
+			t.Errorf("X-Corp-Id = %q, want %q", got, "corp-123")
+		}
+		if got := outReq.Header.Get("X-Request-By"); got != "forward-proxy" {
+			t.Errorf("X-Request-By = %q, want %q", got, "forward-proxy")
+		}
+	})
+}
+
+// countingListener counts accepted TCP connections, to prove pooling
+// actually happens (below) rather than just trusting Transport's
+// documented behavior.
+type countingListener struct {
+	net.Listener
+	accepts atomic.Int64
+}
+
+func (l *countingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err == nil {
+		l.accepts.Add(1)
 	}
-	var buf strings.Builder
-	if err := h.writeProxyRequest(&nopWriteConn{Builder: &buf}, req); err != nil {
-		t.Fatal(err)
+	return conn, err
+}
+
+// TestUpstreamPoolReusesConnections verifies the fix for
+// istio-forward-proxy-acceptance-review finding F11: previously every
+// request dialed a fresh connection to the upstream (no http.Transport or
+// http.Client anywhere in the codebase), measured in the review at +72%
+// latency per request on the plain HTTP path. buildTransport routes
+// requests through an http.Transport instead, which pools and reuses
+// connections to the upstream automatically.
+//
+// A real net.Listener (via httptest.NewUnstartedServer, wrapped to count
+// Accept calls) stands in as the upstream: N sequential requests, each
+// fully drained and closed before the next starts, must reuse the same
+// pooled connection rather than dialing fresh each time.
+func TestUpstreamPoolReusesConnections(t *testing.T) {
+	var requestsSeen atomic.Int64
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestsSeen.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	cl := &countingListener{Listener: upstream.Listener}
+	upstream.Listener = cl
+	upstream.Start()
+	defer upstream.Close()
+
+	h := &Handler{
+		UpstreamProxy: strings.TrimPrefix(upstream.URL, "http://"),
+		DialTimeout:   time.Second,
+		IdleTimeout:   time.Second,
 	}
-	s := buf.String()
-	if !strings.Contains(s, "X-Corp-Id: corp-123\r\n") {
-		t.Error("X-Corp-Id not found")
+
+	const n = 10
+	for i := 0; i < n; i++ {
+		req := httptest.NewRequest("GET", "http://example.com/", nil)
+		outReq, _, err := h.buildUpstreamRequest(req)
+		if err != nil {
+			t.Fatalf("request %d: buildUpstreamRequest: %v", i, err)
+		}
+		resp, err := h.upstreamTransport().RoundTrip(outReq)
+		if err != nil {
+			t.Fatalf("request %d: RoundTrip: %v", i, err)
+		}
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			t.Fatalf("request %d: draining body: %v", i, err)
+		}
+		resp.Body.Close()
 	}
-	if !strings.Contains(s, "X-Request-By: forward-proxy\r\n") {
-		t.Error("X-Request-By not found")
+
+	if got := requestsSeen.Load(); got != n {
+		t.Fatalf("upstream saw %d requests, want %d", got, n)
+	}
+	if accepts := cl.accepts.Load(); accepts != 1 {
+		t.Errorf("upstream accepted %d TCP connections for %d sequential requests, want 1 (connections should be pooled and reused)", accepts, n)
 	}
 }
 
-// TestHostHeaderSet verifies that the Host header is set correctly.
-func TestHostHeaderSet(t *testing.T) {
-	req := httptest.NewRequest("GET", "http://example.com:8080/path", nil)
-	h := &Handler{}
-	var buf strings.Builder
-	if err := h.writeProxyRequest(&nopWriteConn{Builder: &buf}, req); err != nil {
-		t.Fatal(err)
-	}
-	br := bufio.NewReader(strings.NewReader(buf.String()))
-	_, _ = br.ReadString('\n') // skip request-line
-	line, _ := br.ReadString('\n')
-	if !strings.HasPrefix(strings.TrimSpace(line), "Host:") {
-		t.Errorf("expected Host header first, got: %q", line)
-	}
-	if !strings.Contains(line, "example.com:8080") {
-		t.Errorf("Host header wrong: %q", line)
-	}
-}
-
-// TestChunkedRequestBodyReframed verifies the fix for a request-smuggling
-// primitive (istio-forward-proxy-acceptance-review finding F2): a client
-// request with Transfer-Encoding: chunked was forwarded with neither
-// Transfer-Encoding nor Content-Length, so the upstream read it as a
-// zero-length body and parsed the still-arriving body bytes as the start of
-// the next request on the same connection.
+// TestUpstreamChunkedBodyRelayedIntact verifies that a chunked request body
+// still survives the hop to the upstream via the http.Transport-based path
+// (finding F2, issue #26, originally fixed by hand-reframing the body in
+// writeProxyRequest -- now handled natively by Transport, since
+// buildUpstreamRequest carries over ContentLength -1 unchanged and
+// Transport chunk-encodes an unknown-length body correctly by
+// construction).
 //
 // req is built via http.ReadRequest from a raw chunked request, exactly as
-// net/http hands it to a real server: Transfer-Encoding is already stripped
-// out of req.Header (moved to req.TransferEncoding) and req.ContentLength is
-// -1, so this exercises the real production code path rather than a
-// synthetic stand-in.
-func TestChunkedRequestBodyReframed(t *testing.T) {
-	raw := "POST http://echo-origin.echo-origin.svc.cluster.local/echo HTTP/1.1\r\n" +
-		"Host: echo-origin.echo-origin.svc.cluster.local\r\n" +
+// net/http hands it to a real server, to exercise the real production
+// input shape rather than a synthetic stand-in.
+func TestUpstreamChunkedBodyRelayedIntact(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("upstream: reading body: %v", err)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	raw := "POST http://echo-origin.example/echo HTTP/1.1\r\n" +
+		"Host: echo-origin.example\r\n" +
 		"Transfer-Encoding: chunked\r\n" +
 		"\r\n" +
 		"5\r\nhello\r\n0\r\n\r\n"
-
 	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
 	if err != nil {
 		t.Fatalf("constructing test request: %v", err)
@@ -183,41 +216,80 @@ func TestChunkedRequestBodyReframed(t *testing.T) {
 	if req.ContentLength != -1 {
 		t.Fatalf("test premise broken: expected ContentLength -1 for a chunked request, got %d", req.ContentLength)
 	}
-	if _, present := req.Header["Transfer-Encoding"]; present {
-		t.Fatalf("test premise broken: expected net/http to strip Transfer-Encoding out of Header")
+
+	h := &Handler{
+		UpstreamProxy: strings.TrimPrefix(upstream.URL, "http://"),
+		DialTimeout:   time.Second,
+		IdleTimeout:   time.Second,
+	}
+	outReq, _, err := h.buildUpstreamRequest(req)
+	if err != nil {
+		t.Fatalf("buildUpstreamRequest: %v", err)
+	}
+	resp, err := h.upstreamTransport().RoundTrip(outReq)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	if string(gotBody) != "hello" {
+		t.Errorf("upstream received body %q, want %q", gotBody, "hello")
+	}
+}
+
+// TestClientToUpstreamBytesCounted guards against a regression this change
+// nearly introduced silently: writeProxyRequest used to count outbound
+// body bytes itself (for forward_proxy_bytes_transferred_total{direction=
+// "client_to_upstream"}) as it wrote them; Transport now writes the body
+// internally, so buildUpstreamRequest wraps it in a countingReadCloser
+// instead. This checks that wrapper actually counts what Transport reads
+// from it over a real round trip, not just in isolation.
+func TestClientToUpstreamBytesCounted(t *testing.T) {
+	const body = "hello world"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	req := httptest.NewRequest("POST", "http://example.com/", strings.NewReader(body))
+	h := &Handler{
+		UpstreamProxy: strings.TrimPrefix(upstream.URL, "http://"),
+		DialTimeout:   time.Second,
+		IdleTimeout:   time.Second,
+	}
+	outReq, bodyCounter, err := h.buildUpstreamRequest(req)
+	if err != nil {
+		t.Fatalf("buildUpstreamRequest: %v", err)
+	}
+	if bodyCounter == nil {
+		t.Fatal("expected a non-nil body counter for a request with a body")
 	}
 
-	var buf strings.Builder
+	resp, err := h.upstreamTransport().RoundTrip(outReq)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+	resp.Body.Close()
+
+	if got := bodyCounter.Load(); got != int64(len(body)) {
+		t.Errorf("bodyCounter.Load() = %d, want %d", got, len(body))
+	}
+}
+
+// TestNoBodyCounterForBodylessRequest verifies buildUpstreamRequest returns
+// a nil counter for a request with no body, so handleHTTPForward's
+// bytesTransferred.Add call is skipped rather than adding a bogus zero.
+func TestNoBodyCounterForBodylessRequest(t *testing.T) {
+	req := httptest.NewRequest("GET", "http://example.com/", nil)
 	h := &Handler{}
-	if err := h.writeProxyRequest(&nopWriteConn{Builder: &buf}, req); err != nil {
-		t.Fatalf("writeProxyRequest: %v", err)
-	}
-	out := buf.String()
-
-	if !strings.Contains(out, "Transfer-Encoding: chunked\r\n") {
-		t.Fatalf("upstream request has no body-framing header at all:\n%s", out)
-	}
-
-	// The upstream sees exactly this: parse it back with a real HTTP parser,
-	// the way a proxy or origin one hop further out would.
-	br := bufio.NewReader(strings.NewReader(out))
-	parsed, err := http.ReadRequest(br)
+	_, bodyCounter, err := h.buildUpstreamRequest(req)
 	if err != nil {
-		t.Fatalf("upstream could not parse the forwarded request: %v\nwire bytes:\n%s", err, out)
+		t.Fatal(err)
 	}
-	body, err := io.ReadAll(parsed.Body)
-	if err != nil {
-		t.Fatalf("upstream could not read the forwarded body: %v", err)
-	}
-	if string(body) != "hello" {
-		t.Errorf("body = %q, want %q", body, "hello")
-	}
-
-	// Nothing must be left on the connection after the framed request+body:
-	// that's exactly the smuggled bytes a next hop would read as a new
-	// request-line.
-	if _, err := br.ReadByte(); err != io.EOF {
-		t.Errorf("trailing bytes after the framed request (would be parsed as the next request-line), read err = %v", err)
+	if bodyCounter != nil {
+		t.Error("expected a nil body counter for a bodyless request")
 	}
 }
 
@@ -440,13 +512,4 @@ func TestNonAbsoluteURIRejected(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", w.Code)
 	}
-}
-
-// nopWriteConn satisfies io.Writer for writeProxyRequest tests.
-type nopWriteConn struct {
-	*strings.Builder
-}
-
-func (n *nopWriteConn) Write(p []byte) (int, error) {
-	return n.Builder.Write(p)
 }

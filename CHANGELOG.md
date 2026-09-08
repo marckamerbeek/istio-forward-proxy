@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Performance:** every plain-HTTP request used to dial a fresh TCP (and,
+  with mTLS, TLS) connection to the upstream proxy — no connection pooling
+  or reuse at all, measured in the external acceptance review at +72%
+  latency per request, +115% with upstream mTLS enabled (finding F11,
+  issue #29). The forward path now goes through a pooled `http.Transport`
+  (`Transport.Proxy` writes requests to the upstream in absolute-form
+  automatically, the same way any Go HTTP client behaves through an
+  `HTTP_PROXY`), instead of a hand-written per-request dial and wire
+  writer. CONNECT tunnels are unaffected — a tunnel already holds its
+  connection for its own lifetime, so pooling doesn't apply there.
+- `writeProxyRequest`, the hand-rolled request writer this replaces
+  (including its own chunked-body re-framing added for F2, issue #26), is
+  removed: `http.Transport` frames a request with an unknown-length body
+  as `Transfer-Encoding: chunked` correctly by construction, so the
+  hand-written equivalent is no longer needed.
+
 ## [0.2.0] - 2026-09-08
 
 An external acceptance review of this proxy against Squid, Gloo Edge, and
