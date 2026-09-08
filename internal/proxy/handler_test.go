@@ -350,6 +350,83 @@ func TestWrapIdleTimeoutDisabledForNonPositive(t *testing.T) {
 	}
 }
 
+// TestConnectTunnelClosesOnGenuineIdle verifies the fix for
+// istio-forward-proxy-acceptance-review finding F10: neither handleConnect
+// nor tunnel() set any deadline anywhere on an established CONNECT tunnel,
+// so an abandoned tunnel -- opened, then never closed cleanly by the client
+// -- pinned a goroutine and two file descriptors on this proxy forever.
+// Wrapping both legs with wrapIdleTimeout (as handleConnect now does) must
+// make tunnel() return on its own once both sides go genuinely idle,
+// instead of blocking indefinitely.
+func TestConnectTunnelClosesOnGenuineIdle(t *testing.T) {
+	clientPeer, clientEnd := net.Pipe()
+	defer clientPeer.Close()
+	upstreamPeer, upstreamEnd := net.Pipe()
+	defer upstreamPeer.Close()
+
+	const idle = 30 * time.Millisecond
+
+	done := make(chan struct{})
+	go func() {
+		tunnel(wrapIdleTimeout(clientEnd, idle), wrapIdleTimeout(upstreamEnd, idle))
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// An idle tunnel closed itself, as it must.
+	case <-time.After(idle * 20):
+		t.Fatal("tunnel() never returned for a fully idle tunnel (F10 regression)")
+	}
+}
+
+// TestConnectTunnelSurvivesOneDirectionalActivity verifies that wrapping
+// both tunnel legs independently doesn't degrade into two independent
+// per-leg timers: a tunnel carrying continuous traffic in only ONE
+// direction (e.g. a client upload where the origin never talks back) must
+// not be torn down just because the quiet leg's own reads are idle. Each
+// chunk tunnel() relays does a Read on one connection and a Write on the
+// other, so activity in either direction resets both connections'
+// deadlines -- this is what makes the wrapping behave as one shared idle
+// timer for the tunnel as a whole.
+func TestConnectTunnelSurvivesOneDirectionalActivity(t *testing.T) {
+	clientPeer, clientEnd := net.Pipe()
+	upstreamPeer, upstreamEnd := net.Pipe()
+
+	const (
+		idle  = 60 * time.Millisecond
+		gap   = 15 * time.Millisecond // well under idle
+		round = 8                     // round*gap = 120ms, 2x idle
+	)
+
+	done := make(chan struct{})
+	go func() {
+		tunnel(wrapIdleTimeout(clientEnd, idle), wrapIdleTimeout(upstreamEnd, idle))
+		close(done)
+	}()
+	go func() { _, _ = io.Copy(io.Discard, upstreamPeer) }() // drain, so client writes never block
+
+	for i := 0; i < round; i++ {
+		select {
+		case <-done:
+			t.Fatalf("tunnel closed after %d/%d rounds of sustained one-directional activity", i, round)
+		default:
+		}
+		time.Sleep(gap)
+		if _, err := clientPeer.Write([]byte{byte(i)}); err != nil {
+			t.Fatalf("round %d: client write failed, tunnel closed early: %v", i, err)
+		}
+	}
+
+	clientPeer.Close()
+	upstreamPeer.Close()
+	select {
+	case <-done:
+	case <-time.After(idle * 10):
+		t.Fatal("tunnel never closed after both peers disconnected")
+	}
+}
+
 // TestNonAbsoluteURIRejected verifies that non-proxy requests receive a 400.
 func TestNonAbsoluteURIRejected(t *testing.T) {
 	req := httptest.NewRequest("GET", "/relative", nil)
