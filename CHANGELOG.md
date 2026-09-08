@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-08
+
 ### Changed
 
 - **Performance:** every plain-HTTP request used to dial a fresh TCP (and,
@@ -24,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed: `http.Transport` frames a request with an unknown-length body
   as `Transfer-Encoding: chunked` correctly by construction, so the
   hand-written equivalent is no longer needed.
+- Deliberately shipped as its own release, separate from other pending
+  work, so a rollback to `v0.2.0` stays a clean option if this causes
+  trouble in practice.
 
 ## [0.2.0] - 2026-09-08
 
