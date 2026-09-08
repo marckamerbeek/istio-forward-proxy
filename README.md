@@ -241,7 +241,7 @@ EOF
 **Use the published image** (no build needed):
 
 ```bash
-# The chart defaults to ghcr.io/mkamerbeek/istio-forward-proxy:0.1.0
+# The chart defaults to ghcr.io/mkamerbeek/istio-forward-proxy:0.2.0
 # Override in your values file if you use a private registry mirror.
 ```
 
@@ -249,7 +249,7 @@ EOF
 
 ```bash
 export IMAGE_REPO=your-registry.corp.local/istio-forward-proxy
-export IMAGE_TAG=0.1.0
+export IMAGE_TAG=0.2.0
 PUSH=1 ./scripts/build.sh
 ```
 
@@ -289,7 +289,7 @@ environment.
 # ── Image ────────────────────────────────────────────────────────────────────
 image:
   repository: ghcr.io/mkamerbeek/istio-forward-proxy  # or your private mirror
-  tag: "0.1.0"
+  tag: "0.2.0"
   pullPolicy: IfNotPresent
 
 # imagePullSecrets:         # uncomment if your registry requires credentials
