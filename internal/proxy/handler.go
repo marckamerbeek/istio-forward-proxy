@@ -124,13 +124,10 @@ func (h *Handler) handleHTTPForward(w http.ResponseWriter, r *http.Request) {
 		requestsTotal.WithLabelValues("HTTP", "upstream_error").Inc()
 		return
 	}
+	upstream = wrapIdleTimeout(upstream, h.IdleTimeout)
 	defer upstream.Close()
 	activeConnections.Inc()
 	defer activeConnections.Dec()
-
-	if err := upstream.SetDeadline(time.Now().Add(h.IdleTimeout)); err != nil {
-		h.Logger.Debug("set deadline failed", "error", err)
-	}
 
 	// Write request with ABSOLUTE URI intact. This is the core difference from
 	// Envoy, which would write: GET /path HTTP/1.1
@@ -475,6 +472,52 @@ func tunnel(client, upstream net.Conn) (bytesIn, bytesOut int64) {
 
 type closeWriter interface {
 	CloseWrite() error
+}
+
+// wrapIdleTimeout wraps conn so that timeout behaves as a genuine idle
+// timeout -- one that fires only after a gap with no activity -- instead of
+// a fixed deadline counted from when the connection was opened. A
+// non-positive timeout disables it (no deadline at all), matching the
+// common Go convention rather than the previous behavior of every
+// non-positive value producing an already-expired deadline.
+func wrapIdleTimeout(conn net.Conn, timeout time.Duration) net.Conn {
+	if timeout <= 0 {
+		return conn
+	}
+	return &idleTimeoutConn{Conn: conn, timeout: timeout}
+}
+
+// idleTimeoutConn resets the wrapped connection's deadline to now+timeout
+// before every Read and Write, so the deadline only ever expires after a
+// genuine gap with no activity on the connection.
+//
+// net.Conn's deadline API is inherently a fixed point in time, not a
+// resettable idle timer -- calling SetDeadline once at connection open (the
+// previous approach in handleHTTPForward) makes it fire at that fixed
+// offset regardless of how much legitimate traffic is still flowing, e.g.
+// cutting off a slow-but-live response body partway through (acceptance
+// review finding F9, istio-forward-proxy issue #27). Resetting it on every
+// actual Read/Write syscall -- which is exactly when bufio.Reader and
+// io.Copy call through to the underlying connection, i.e. exactly when the
+// connection was NOT idle -- turns it into the idle timeout the flag name
+// promises.
+type idleTimeoutConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *idleTimeoutConn) Read(b []byte) (int, error) {
+	if err := c.Conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Read(b)
+}
+
+func (c *idleTimeoutConn) Write(b []byte) (int, error) {
+	if err := c.Conn.SetDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Write(b)
 }
 
 func writeHeader(w io.Writer, name, value string) error {

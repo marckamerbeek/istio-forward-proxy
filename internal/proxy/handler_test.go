@@ -5,11 +5,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAbsolutePathPreservation verifies the core property of this proxy:
@@ -270,6 +272,82 @@ func TestAuditIdentityNotForgeable(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestIdleTimeoutSurvivesSlowButLiveTransfer verifies the fix for
+// istio-forward-proxy-acceptance-review finding F9: the deadline behind
+// --idle-timeout used to be set exactly once, at connection open, so it
+// fired at that fixed offset regardless of ongoing activity -- cutting off
+// a slow-but-live transfer partway through with no error status, just fewer
+// bytes than promised. With idleTimeoutConn, every actual Read resets the
+// deadline, so a transfer whose gaps between chunks all stay under the
+// idle timeout must survive even though its total duration exceeds it many
+// times over.
+func TestIdleTimeoutSurvivesSlowButLiveTransfer(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+
+	const (
+		idle       = 40 * time.Millisecond
+		gap        = idle / 2 // well under idle, so activity keeps resetting the deadline
+		chunkCount = 5
+	)
+
+	go func() {
+		defer server.Close()
+		for i := 0; i < chunkCount; i++ {
+			time.Sleep(gap)
+			if _, err := server.Write([]byte{byte(i)}); err != nil {
+				return
+			}
+		}
+	}()
+
+	wrapped := wrapIdleTimeout(client, idle)
+	defer wrapped.Close()
+
+	buf := make([]byte, 1)
+	for i := 0; i < chunkCount; i++ {
+		n, err := wrapped.Read(buf)
+		if err != nil {
+			t.Fatalf("chunk %d: read failed even though every gap (%s) was under the idle timeout (%s): %v", i, gap, idle, err)
+		}
+		if n != 1 || buf[0] != byte(i) {
+			t.Fatalf("chunk %d: got %v, want [%d]", i, buf[:n], i)
+		}
+	}
+}
+
+// TestIdleTimeoutFiresOnGenuineIdle verifies the other half of the F9 fix:
+// resetting the deadline on activity must not turn it into "no timeout at
+// all" -- a connection with no activity whatsoever must still time out.
+func TestIdleTimeoutFiresOnGenuineIdle(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	wrapped := wrapIdleTimeout(client, 20*time.Millisecond)
+	defer wrapped.Close()
+
+	_, err := wrapped.Read(make([]byte, 1)) // server never writes anything
+	netErr, ok := err.(net.Error)
+	if !ok || !netErr.Timeout() {
+		t.Fatalf("expected a timeout error on genuine idle, got %v", err)
+	}
+}
+
+// TestWrapIdleTimeoutDisabledForNonPositive verifies that a non-positive
+// timeout disables the wrapper entirely (no deadline at all), rather than
+// reproducing the pre-fix bug where time.Now().Add(0) produced a deadline
+// that had already expired.
+func TestWrapIdleTimeoutDisabledForNonPositive(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	if wrapped := wrapIdleTimeout(client, 0); wrapped != client {
+		t.Error("timeout <= 0 should return the connection unwrapped")
+	}
 }
 
 // TestNonAbsoluteURIRejected verifies that non-proxy requests receive a 400.
