@@ -75,6 +75,16 @@ proxy:
     # X-Corp-Id: "platform-egress"
     # X-Request-By: "istio-forward-proxy"
 
+  audit:
+    # Trust a client-supplied X-Forwarded-Client-Cert header for the audit
+    # log's SPIFFE identity when there's no verified mTLS peer certificate
+    # on the connection -- which in ambient mode is always, since ztunnel
+    # terminates mTLS at L4 and never touches this header itself. Leave
+    # false unless something in front of this proxy (a waypoint, not
+    # ztunnel) actually sanitizes and re-sets it: otherwise any caller can
+    # dictate its own identity in the audit trail.
+    trustXFCCHeader: false
+
   timeouts:
     dial: 10s
     idle: 90s

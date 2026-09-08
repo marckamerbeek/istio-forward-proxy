@@ -50,6 +50,7 @@ spec:
             - --log-level={{ .Values.proxy.logLevel }}
             - --mtls={{ .Values.proxy.mtls.enabled }}
             - --insecure-skip-verify={{ .Values.proxy.mtls.insecureSkipVerify }}
+            - --trust-xfcc-header={{ .Values.proxy.audit.trustXFCCHeader }}
             - --dial-timeout={{ .Values.proxy.timeouts.dial }}
             - --idle-timeout={{ .Values.proxy.timeouts.idle }}
             - --read-timeout={{ .Values.proxy.timeouts.read }}

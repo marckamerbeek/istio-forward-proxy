@@ -30,7 +30,9 @@
 │                  ztunnel on destination node                      │
 │                                                                   │
 │  - decrypts HBONE                                                 │
-│  - optionally sets SPIFFE URI in X-Forwarded-Client-Cert header   │
+│  - does NOT set or sanitize X-Forwarded-Client-Cert -- ztunnel is │
+│    L4 only and never parses HTTP, so whatever a caller sends in   │
+│    that header reaches the proxy exactly as sent, unverified      │
 │  - delivers plain TCP to forward-proxy pod on port 3128           │
 └───────────────────────────────────────────────────────────────────┘
                           │
@@ -55,7 +57,8 @@
 │  4. Audit event                                                   │
 │     {                                                             │
 │       "ts": "...",                                                │
-│       "spiffe": "spiffe://.../ns/team-a/sa/app-x",               │
+│       "spiffe": "",   ← empty by default in this topology; see    │
+│                          README's "Audit identity" section        │
 │       "method": "HTTP-FORWARD",                                   │
 │       "target_host": "example.com",                               │
 │       "decision": "allow"                                         │
