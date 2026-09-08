@@ -64,22 +64,25 @@
 │       "decision": "allow"                                         │
 │     }                                                             │
 │                                                                   │
-│  5. Open mTLS connection to upstream                              │
-│     - tls.Dial("tcp", "corporate-proxy:8080", tlsCfg)             │
+│  5. RoundTrip via a pooled http.Transport                         │
+│     - Transport.Proxy = corporate-proxy:8080, so requests are      │
+│       written to it in ABSOLUTE-form automatically                │
+│     - a connection is reused from the pool when one is idle;       │
+│       otherwise Transport dials a fresh one via DialTLSContext:    │
+│       tls.Dial("tcp", "corporate-proxy:8080", tlsCfg)             │
 │     - tlsCfg.Certificates = client cert from Secret              │
 │     - tlsCfg.RootCAs = ca.crt from Secret                        │
 │     - cert-manager rotates automatically                          │
-│     - fsnotify detects file change, reloads without restart       │
-│                                                                   │
-│  6. Write request-line WITH ABSOLUTE PATH                         │
-│     → conn.Write("GET http://example.com/path HTTP/1.1\r\n")     │
+│     - fsnotify detects file change, reloads without restart --     │
+│       a NEW dial picks up the rotated cert; connections already    │
+│       pooled keep using whichever cert was current when dialed     │
 │     → headers:                                                    │
 │        Host: example.com                                          │
 │        Proxy-Authorization: Basic <base64>                        │
 │        [custom headers from values.yaml]                          │
 │        [end-to-end client headers, filtered]                      │
 │                                                                   │
-│  7. Read upstream response, copy to client                        │
+│  6. Read upstream response, copy to client                        │
 └───────────────────────────────────────────────────────────────────┘
                           │
                           │  mTLS (client cert auth)

@@ -26,11 +26,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/marckamerbeek/istio-forward-proxy/internal/audit"
@@ -84,6 +84,12 @@ type Handler struct {
 	// spiffeFromRequest.
 	TrustXFCCHeader bool
 	Logger          *slog.Logger
+
+	// transport is the shared http.Transport used to pool connections to
+	// the upstream proxy for the plain-HTTP forward path. Built lazily on
+	// first use; see upstreamTransport.
+	transportOnce sync.Once
+	transport     *http.Transport
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -116,34 +122,33 @@ func (h *Handler) handleHTTPForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstream, err := h.dialUpstream()
+	outReq, bodyCounter, err := h.buildUpstreamRequest(r)
 	if err != nil {
-		upstreamDialErrors.Inc()
-		h.Logger.Error("upstream dial failed", "error", err, "target_host", targetHost)
-		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+		h.Logger.Error("building upstream request failed", "error", err)
+		http.Error(w, "bad request", http.StatusBadGateway)
 		requestsTotal.WithLabelValues("HTTP", "upstream_error").Inc()
 		return
 	}
-	upstream = wrapIdleTimeout(upstream, h.IdleTimeout)
-	defer upstream.Close()
+
 	activeConnections.Inc()
 	defer activeConnections.Dec()
 
-	// Write request with ABSOLUTE URI intact. This is the core difference from
-	// Envoy, which would write: GET /path HTTP/1.1
-	// We write:                 GET http://host:port/path HTTP/1.1
-	if err := h.writeProxyRequest(upstream, r); err != nil {
-		h.Logger.Error("write upstream request failed", "error", err)
-		http.Error(w, "upstream write failed", http.StatusBadGateway)
-		requestsTotal.WithLabelValues("HTTP", "upstream_error").Inc()
-		return
+	// RoundTrip writes the request with the ABSOLUTE URI intact -- the core
+	// difference from Envoy, which would write: GET /path HTTP/1.1
+	// We (via Transport.Proxy) write:           GET http://host:port/path HTTP/1.1
+	// See buildTransport for why this reuses pooled connections instead of
+	// dialing fresh every time (finding F11, issue #29).
+	resp, err := h.upstreamTransport().RoundTrip(outReq)
+	if bodyCounter != nil {
+		// RoundTrip has finished writing the request (including its body)
+		// by the time it returns a response or a final error, so this
+		// count is complete either way.
+		bytesTransferred.WithLabelValues("client_to_upstream").Add(float64(bodyCounter.Load()))
 	}
-
-	br := bufio.NewReader(upstream)
-	resp, err := http.ReadResponse(br, r)
 	if err != nil {
-		h.Logger.Error("read upstream response failed", "error", err)
-		http.Error(w, "upstream read failed", http.StatusBadGateway)
+		upstreamDialErrors.Inc()
+		h.Logger.Error("upstream round trip failed", "error", err, "target_host", targetHost)
+		http.Error(w, "upstream unavailable", http.StatusBadGateway)
 		requestsTotal.WithLabelValues("HTTP", "upstream_error").Inc()
 		return
 	}
@@ -177,86 +182,140 @@ func (h *Handler) handleHTTPForward(w http.ResponseWriter, r *http.Request) {
 	requestsTotal.WithLabelValues("HTTP", "allow").Inc()
 }
 
-// writeProxyRequest writes an HTTP/1.1 request to the upstream connection
-// with the absolute URI intact.
-func (h *Handler) writeProxyRequest(w io.Writer, r *http.Request) error {
-	absURI := r.URL.String()
+// buildUpstreamRequest turns the incoming proxy request into one suitable
+// for Transport.RoundTrip: hop-by-hop headers -- including any
+// Proxy-Authorization the client itself supplied -- are stripped, then
+// this proxy's own Proxy-Authorization and ExtraHeaders are set.
+//
+// r.Clone carries over everything else that matters unchanged: the
+// absolute-form URL, Host, and -- critically for a chunked request body --
+// ContentLength and TransferEncoding. A request whose length is unknown
+// (net/http sets ContentLength -1 for a chunked request) is chunk-encoded
+// by Transport automatically and correctly; previously this had to be done
+// by hand here (finding F2, issue #26), because the wire-level writer this
+// replaced had no equivalent of Transport's framing logic.
+//
+// The returned counter, non-nil whenever the request has a body, tracks
+// bytes as Transport reads them off that body -- Transport writes the
+// request itself now, so this is the only remaining way to keep the
+// forward_proxy_bytes_transferred_total{direction="client_to_upstream"}
+// metric accurate; it was previously counted in the writer this replaced.
+func (h *Handler) buildUpstreamRequest(r *http.Request) (*http.Request, *countingReadCloser, error) {
+	outReq := r.Clone(r.Context())
+	// Only ever set on the server-side request; Transport.RoundTrip refuses
+	// to send a request with this populated.
+	outReq.RequestURI = ""
 
-	if _, err := fmt.Fprintf(w, "%s %s HTTP/1.1\r\n", r.Method, absURI); err != nil {
-		return err
-	}
-
-	if err := writeHeader(w, "Host", r.Host); err != nil {
-		return err
+	for k := range outReq.Header {
+		if isHopByHop(k) || strings.EqualFold(k, "Proxy-Authorization") {
+			outReq.Header.Del(k)
+		}
 	}
 	if h.UpstreamAuth != "" {
-		if err := writeHeader(w, "Proxy-Authorization", h.UpstreamAuth); err != nil {
-			return err
-		}
+		outReq.Header.Set("Proxy-Authorization", h.UpstreamAuth)
 	}
 	for name, value := range h.ExtraHeaders {
-		if err := writeHeader(w, name, value); err != nil {
-			return err
-		}
+		outReq.Header.Set(name, value)
 	}
 
-	for k, vv := range r.Header {
-		if isHopByHop(k) || strings.EqualFold(k, "Host") || strings.EqualFold(k, "Proxy-Authorization") {
-			continue
-		}
-		for _, v := range vv {
-			if err := writeHeader(w, k, v); err != nil {
-				return err
-			}
-		}
+	var bodyCounter *countingReadCloser
+	if outReq.Body != nil && outReq.Body != http.NoBody {
+		bodyCounter = &countingReadCloser{ReadCloser: outReq.Body}
+		outReq.Body = bodyCounter
 	}
+	return outReq, bodyCounter, nil
+}
 
-	hasBody := r.Body != nil && r.Body != http.NoBody
+// countingReadCloser wraps a request body to count bytes as they're read,
+// safe to read concurrently with the count still being updated (Transport
+// writes a request's body on its own internal goroutine).
+type countingReadCloser struct {
+	io.ReadCloser
+	n atomic.Int64
+}
 
-	// A request whose length is unknown (net/http sets ContentLength -1 for
-	// this) had Transfer-Encoding: chunked on the wire from the client -- and
-	// net/http already stripped that header out of r.Header above, consuming
-	// it into r.TransferEncoding instead. Without re-declaring some framing
-	// here, the body below would go out with neither Content-Length nor
-	// Transfer-Encoding: the upstream reads a zero-length body, considers the
-	// request complete, and parses the body bytes that follow as the start of
-	// the next request on the same connection. Re-chunk instead of buffering
-	// to compute Content-Length, so streaming a body larger than memory still
-	// works.
-	chunked := hasBody && r.ContentLength < 0
-	if chunked {
-		if err := writeHeader(w, "Transfer-Encoding", "chunked"); err != nil {
-			return err
-		}
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+func (c *countingReadCloser) Load() int64 {
+	return c.n.Load()
+}
+
+// maxIdleUpstreamConnsPerHost bounds the pool of idle upstream connections.
+// Every request from a given Handler targets the same single upstream, so
+// this is really "how many idle connections to keep for one host" -- worth
+// more headroom than Transport's own default of 2 for bursty traffic.
+const maxIdleUpstreamConnsPerHost = 32
+
+// upstreamTransport returns the shared http.Transport used to forward
+// plain-HTTP requests to the upstream proxy, building it lazily on first
+// use and reusing it for the Handler's lifetime.
+//
+// Using http.Transport instead of dialing fresh per request (the previous
+// approach; finding F11, issue #29) gets connection pooling, HTTP/1.1
+// keep-alive, and safe reuse of a connection that goes stale while idle in
+// the pool from a heavily-tested standard-library implementation, rather
+// than reimplementing stale-connection detection and retry semantics by
+// hand -- both notoriously easy to get subtly wrong.
+func (h *Handler) upstreamTransport() *http.Transport {
+	h.transportOnce.Do(func() {
+		h.transport = h.buildTransport()
+	})
+	return h.transport
+}
+
+// buildTransport configures an http.Transport that treats h.UpstreamProxy
+// as an HTTP(S) proxy. Go's client machinery then writes plain-HTTP target
+// requests to it in absolute-form (RFC 7230 §5.3.2) automatically -- the
+// standard behavior of any Go HTTP client routed through an HTTP_PROXY,
+// and exactly the "GET http://host/path HTTP/1.1" behavior this proxy
+// exists to preserve.
+//
+// The proxy URL's scheme controls how Transport dials the connection to
+// the upstream: "https" routes through DialTLSContext (this proxy's own
+// mTLS origination), "http" through DialContext. Only the one matching
+// h.TLSEnabled is set, since which one Transport calls never changes for
+// the lifetime of a Handler. Either way the dial goes through
+// dialForTransport, which wraps dialUpstream with wrapIdleTimeout so a
+// pooled connection keeps exactly the F9/F10 idle-timeout behavior already
+// in place for the CONNECT path.
+func (h *Handler) buildTransport() *http.Transport {
+	scheme := "http"
+	if h.TLSEnabled {
+		scheme = "https"
 	}
+	proxyURL := &url.URL{Scheme: scheme, Host: h.UpstreamProxy}
 
-	if _, err := w.Write([]byte("\r\n")); err != nil {
-		return err
+	t := &http.Transport{
+		Proxy:               http.ProxyURL(proxyURL),
+		MaxIdleConnsPerHost: maxIdleUpstreamConnsPerHost,
+		// Reuses the configured idle timeout for pool eviction too: an idle
+		// pooled connection and an idle in-flight one are the same kind of
+		// "nothing happened for this long" this proxy already defines.
+		IdleConnTimeout: h.IdleTimeout,
 	}
+	if h.TLSEnabled {
+		t.DialTLSContext = h.dialForTransport
+	} else {
+		t.DialContext = h.dialForTransport
+	}
+	return t
+}
 
-	if hasBody {
-		var n int64
-		var err error
-		if chunked {
-			cw := httputil.NewChunkedWriter(w)
-			if n, err = io.Copy(cw, r.Body); err == nil {
-				if err = cw.Close(); err == nil {
-					// cw.Close() only emits the "0\r\n" last-chunk line; the
-					// empty trailer section still needs its own terminating
-					// CRLF (RFC 9112 §7.1.3) or the upstream blocks waiting
-					// for a trailer field that never arrives.
-					_, err = w.Write([]byte("\r\n"))
-				}
-			}
-		} else {
-			n, err = io.Copy(w, r.Body)
-		}
-		if err != nil {
-			return err
-		}
-		bytesTransferred.WithLabelValues("client_to_upstream").Add(float64(n))
+// dialForTransport is Transport's DialContext/DialTLSContext hook: it
+// dials the upstream exactly as the CONNECT path already does
+// (dialUpstream) and applies the same idle-timeout wrapping, so a
+// connection Transport hands out -- freshly dialed or reused from its pool
+// -- behaves identically from the caller's perspective either way.
+func (h *Handler) dialForTransport(_ context.Context, _, _ string) (net.Conn, error) {
+	conn, err := h.dialUpstream()
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	return wrapIdleTimeout(conn, h.IdleTimeout), nil
 }
 
 // -----------------------------------------------------------------------------
