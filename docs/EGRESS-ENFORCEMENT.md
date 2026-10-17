@@ -42,6 +42,91 @@ kubectl get pods -n kube-system -l k8s-app=calico-node 2>/dev/null
 # does nothing.
 ```
 
+## Cilium: `ipBlock` does not reach cluster-internal destinations
+
+If you're on Cilium, read this before anything else in this guide — it
+affects the chart's own default egress `NetworkPolicy`
+(`templates/networkpolicy.yaml`), not just the per-namespace policies you
+add yourself.
+
+That policy grants the proxy pod egress to the Kubernetes API server (for
+the ServiceEntry watch) and to your upstream proxy chain using plain
+`ipBlock: 0.0.0.0/0` rules. On most CNIs this is exactly as permissive as
+it looks. **On Cilium it is not**: Cilium enforces `NetworkPolicy` based on
+security identity, not raw IP, and its translation of `ipBlock`/CIDR rules
+only ever matches its "world" identity (genuinely external, non-cluster
+traffic) — never a cluster-internal destination, no matter how broad the
+CIDR. Two consequences, both confirmed live via `cilium monitor --type
+drop`:
+
+1. **The Kubernetes API server rule never grants access.** Cilium resolves
+   the API server's real backend to its own *reserved* `kube-apiserver`
+   identity. The symptom is silent: the ServiceEntry watcher's initial
+   `List` call hangs forever, logging only `"waiting for ServiceEntry
+   cache sync"` with no further output (no error, no retry visible), and
+   `/readyz` never returns `ok`. It looks like an application bug; it
+   isn't.
+
+   ```
+   xx drop (Policy denied) ... identity <proxy>->kube-apiserver:
+   <proxy-ip>:<port> -> <apiserver-ip>:6443 tcp SYN
+   ```
+
+2. **The upstream-proxy-chain rule doesn't work for an in-cluster upstream
+   either** — this one isn't specific to reserved identities. If
+   `proxy.upstream.host` is itself a Kubernetes Service rather than a
+   genuinely external host, `ipBlock` still won't match it, even though
+   its Cilium identity is perfectly ordinary:
+
+   ```
+   xx drop (Policy denied) ... identity <proxy>-><ordinary-id>:
+   <proxy-ip>:<port> -> <upstream-ip>:3128 tcp SYN
+   ```
+
+   (External upstreams — a real corporate proxy outside the cluster — are
+   unaffected; only an in-cluster upstream Service hits this.)
+
+**Fix**: add a supplementary `CiliumNetworkPolicy` (Cilium's own CRD,
+already present wherever Cilium is installed) alongside the chart's
+vendored `NetworkPolicy`. Kubernetes `NetworkPolicy` and
+`CiliumNetworkPolicy` are additive when both select the same pod, so this
+only adds the access that's actually missing — it doesn't replace or
+duplicate anything the chart already does:
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: istio-forward-proxy-egress-cilium-supplement
+  namespace: istio-egress
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: istio-forward-proxy
+      app.kubernetes.io/instance: istio-forward-proxy
+  egress:
+    # Case 1: reach the Kubernetes API server for the ServiceEntry watch.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+    # Case 2: reach an in-cluster upstream proxy, if you have one. Adjust
+    # matchLabels/namespace to your own upstream's Service selector, and
+    # omit this rule entirely if your upstream is external.
+    - toEndpoints:
+        - matchLabels:
+            app: my-upstream-proxy
+            k8s:io.kubernetes.pod.namespace: my-upstream-namespace
+      toPorts:
+        - ports:
+            - port: "3128"
+              protocol: TCP
+```
+
 ## Three layers of enforcement
 
 No single control is airtight on its own, so this guide layers three of
